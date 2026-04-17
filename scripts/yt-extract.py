@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""
+yt-extract.py — Single-call YouTube video data extractor for yt-extract.
+Handles metadata, transcript, optional comments, and optional screenshots.
+Returns structured markdown to stdout.
+
+Usage:
+    python yt-extract.py <URL> [--comments] [--screenshots [TIMESTAMPS]]
+"""
+
+import sys
+import os
+import re
+import json
+import glob
+import subprocess
+import tempfile
+import argparse
+import shutil
+
+# Force UTF-8 on Windows
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+    os.environ["PYTHONUTF8"] = "1"
+
+TMPDIR = tempfile.gettempdir()
+
+
+def run_ytdlp(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["yt-dlp"] + args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+# --- Utility functions ---
+
+
+def slugify(text: str, max_length: int = 50) -> str:
+    """Convert text to URL-safe slug."""
+    text = text.lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text).strip("-")
+    text = re.sub(r"-+", "-", text)
+    return text[:max_length].rstrip("-")
+
+
+def format_timestamp_display(seconds: float) -> str:
+    """Format seconds as M:SS or H:MM:SS for display."""
+    s = int(seconds)
+    h, remainder = divmod(s, 3600)
+    m, sec = divmod(remainder, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
+def format_timestamp_filename(seconds: float) -> str:
+    """Format seconds as MMmSSs or HhMMmSSs for filenames."""
+    s = int(seconds)
+    h, remainder = divmod(s, 3600)
+    m, sec = divmod(remainder, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m{sec:02d}s"
+    return f"{m:02d}m{sec:02d}s"
+
+
+def parse_timestamp(ts_str: str) -> float:
+    """Parse user timestamp to seconds. Accepts: SS, M:SS, MM:SS, H:MM:SS, HH:MM:SS."""
+    ts_str = ts_str.strip()
+    if re.match(r"^\d+(\.\d+)?$", ts_str):
+        return float(ts_str)
+    parts = ts_str.split(":")
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    raise ValueError(f"Invalid timestamp: {ts_str}")
+
+
+def parse_vtt_timestamp(ts_str: str) -> float:
+    """Parse VTT timestamp to seconds. Accepts HH:MM:SS.mmm and H:MM:SS.mmm."""
+    match = re.match(r"(\d+):(\d{2}):(\d{2})\.(\d{3})", ts_str.strip())
+    if match:
+        h, m, s, ms = match.groups()
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+    # Fallback: try without milliseconds
+    match2 = re.match(r"(\d+):(\d{2}):(\d{2})", ts_str.strip())
+    if match2:
+        h, m, s = match2.groups()
+        return int(h) * 3600 + int(m) * 60 + int(s)
+    print(f"WARNING: Could not parse VTT timestamp: {ts_str}", file=sys.stderr)
+    return 0.0
+
+
+def format_date(upload_date: str) -> str:
+    if len(upload_date) == 8:
+        return f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+    return upload_date
+
+
+# --- Core extraction functions ---
+
+
+def extract_metadata(url: str) -> dict | None:
+    result = run_ytdlp(["--dump-json", "--no-playlist", "--no-warnings", url])
+    if result.returncode != 0:
+        return None
+    try:
+        d = json.loads(result.stdout)
+        return {
+            "id": d.get("id", ""),
+            "title": d.get("title", ""),
+            "channel": d.get("channel", ""),
+            "upload_date": d.get("upload_date", ""),
+            "duration_string": d.get("duration_string", ""),
+            "duration": d.get("duration", 0),
+            "view_count": d.get("view_count", 0),
+            "like_count": d.get("like_count", 0),
+            "description": d.get("description", ""),
+            "is_live": d.get("is_live", False),
+            "was_live": d.get("was_live", False),
+            "chapters": d.get("chapters") or [],
+        }
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def download_and_process_vtt(url: str, video_id: str) -> tuple[str, str, list[tuple[float, str]]]:
+    """Returns (transcript_text, subtitle_hint, segments).
+    segments is a list of (start_seconds, text) tuples for timestamp mapping.
+    """
+    prefix = os.path.join(TMPDIR, f"yt_analyze_{video_id}")
+
+    # Clean up any previous files for this ID
+    for f in glob.glob(f"{prefix}*"):
+        os.remove(f)
+
+    result = run_ytdlp([
+        "--write-auto-subs", "--write-subs",
+        "--sub-langs", ".*orig,en",
+        "--sub-format", "vtt", "--convert-subs", "vtt",
+        "--skip-download", "--no-playlist", "--no-warnings",
+        "-o", f"{prefix}.%(ext)s",
+        url,
+    ])
+
+    # Find VTT files
+    vtt_files = glob.glob(f"{prefix}*.vtt")
+    if not vtt_files:
+        return "", "none", []
+
+    vtt_path = vtt_files[0]
+    filename = os.path.basename(vtt_path)
+
+    # Auto-detection: check filename pattern only (yt-dlp marks auto-subs
+    # in filenames; stderr contains "auto" in unrelated messages too)
+    is_auto = ".auto." in filename.lower()
+
+    # Extract language from filename pattern: yt_analyze_ID.LANG.vtt
+    lang_match = re.search(r"\.([a-z]{2}(?:-[a-z]+)?(?:-orig)?)\.vtt$", filename, re.I)
+    lang = lang_match.group(1) if lang_match else "en"
+
+    # Process VTT to plain text AND timestamped segments
+    with open(vtt_path, encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    segments = []
+    current_start = 0.0
+    current_lines = []
+    text_lines = []
+
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("WEBVTT") or re.match(r"^\d+$", line):
+            continue
+
+        # Parse VTT timestamp lines: 00:02:15.000 --> 00:02:18.500
+        arrow_match = re.match(
+            r"(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}",
+            line,
+        )
+        if arrow_match:
+            # Save previous segment
+            if current_lines:
+                segments.append((current_start, " ".join(current_lines)))
+            current_start = parse_vtt_timestamp(arrow_match.group(1))
+            current_lines = []
+            continue
+
+        # Skip bare timestamp lines (without -->)
+        if re.match(r"^\d{2}:\d{2}:\d{2}", line):
+            continue
+
+        # Text line — strip VTT tags
+        clean = re.sub(r"<[^>]+>", "", line).strip()
+        if clean:
+            current_lines.append(clean)
+            text_lines.append(clean)
+
+    # Don't forget the last segment
+    if current_lines:
+        segments.append((current_start, " ".join(current_lines)))
+
+    # Deduplicate consecutive identical lines (auto-caption overlap)
+    deduped = []
+    for line in text_lines:
+        if deduped and deduped[-1] == line:
+            continue
+        deduped.append(line)
+
+    # Deduplicate consecutive identical segments
+    deduped_segments = []
+    for seg in segments:
+        if deduped_segments and deduped_segments[-1][1] == seg[1]:
+            continue
+        deduped_segments.append(seg)
+
+    transcript = " ".join(deduped)
+
+    # Cleanup temp files
+    for f in glob.glob(f"{prefix}*"):
+        os.remove(f)
+
+    hint = f"auto-generated ({lang})" if is_auto else f"manual ({lang})"
+    return transcript, hint, deduped_segments
+
+
+def fetch_comments(url: str) -> list[dict]:
+    result = run_ytdlp([
+        "--write-comments",
+        "--extractor-args", "youtube:comment_sort=top;max_comments=20,20,20,20",
+        "--skip-download", "--dump-json",
+        "--no-playlist", "--no-warnings",
+        url,
+    ])
+
+    if result.returncode != 0:
+        return []
+
+    try:
+        d = json.loads(result.stdout)
+        comments = d.get("comments", [])
+        comments.sort(key=lambda x: x.get("like_count", 0), reverse=True)
+        return [
+            {
+                "author": c.get("author", ""),
+                "likes": c.get("like_count", 0),
+                "text": c.get("text", "")[:300],
+            }
+            for c in comments[:10]
+        ]
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
+def filter_description(desc: str) -> str:
+    """Keep: tool links, GitHub repos, docs, chapter markers. Remove: social/subscribe/sponsor boilerplate."""
+    lines = desc.split("\n")
+    filtered = []
+    skip_patterns = [
+        r"(?i)(subscribe|follow\s+(me|us)|patreon|donation|sponsor|merch|social)",
+        r"(?i)(instagram|twitter|x\.com|tiktok|facebook|discord\.gg|linkedin\.com/in/)",
+    ]
+
+    for line in lines:
+        if any(re.search(p, line) for p in skip_patterns):
+            continue
+        filtered.append(line)
+
+    return "\n".join(filtered).strip()
+
+
+# --- Screenshot functions ---
+
+
+def check_ffmpeg() -> bool:
+    """Check if ffmpeg is available in PATH."""
+    return shutil.which("ffmpeg") is not None
+
+
+def get_chapter_for_timestamp(timestamp: float, chapters: list[dict]) -> str | None:
+    """Find chapter title for a given timestamp."""
+    for ch in chapters:
+        if ch.get("start_time", 0) <= timestamp < ch.get("end_time", float("inf")):
+            return ch.get("title", "")
+    return None
+
+
+def resolve_timestamps(
+    screenshots_arg: str, chapters: list[dict], duration: float,
+    warnings: list[str],
+) -> list[float] | str:
+    """Determine which timestamps to screenshot.
+    Returns list of seconds, or 'ASK_USER' if auto mode but no chapters.
+    Appends any issues to warnings list.
+    """
+    if screenshots_arg == "auto":
+        if chapters:
+            # Validate chapter timestamps against duration
+            return [
+                ch["start_time"] for ch in chapters
+                if 0 <= ch.get("start_time", -1) <= duration
+            ]
+        return "ASK_USER"
+
+    # Parse comma-separated timestamps
+    timestamps = []
+    for ts in screenshots_arg.split(","):
+        ts = ts.strip()
+        if not ts:
+            continue
+        try:
+            secs = parse_timestamp(ts)
+            if 0 <= secs <= duration:
+                timestamps.append(secs)
+            else:
+                msg = f"Timestamp {ts} ({secs}s) outside video duration ({duration}s), skipping."
+                warnings.append(msg)
+                print(f"WARNING: {msg}", file=sys.stderr)
+        except ValueError as e:
+            msg = f"{e}, skipping."
+            warnings.append(msg)
+            print(f"WARNING: {msg}", file=sys.stderr)
+
+    return sorted(timestamps)
+
+
+def get_stream_url(url: str) -> str | None:
+    """Get direct video stream URL via yt-dlp -g."""
+    result = run_ytdlp([
+        "-g", "-f", "best[height<=1080]/best",
+        "--no-playlist", "--no-warnings", url,
+    ])
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.strip().split("\n")
+    return lines[0] if lines else None
+
+
+def extract_screenshots(
+    url: str,
+    timestamps: list[float],
+    slug: str,
+    chapters: list[dict],
+    warnings: list[str],
+) -> list[tuple[float, str]]:
+    """Extract PNG screenshots at given timestamps via ffmpeg.
+    Returns [(timestamp_seconds, filepath), ...].
+    Appends any issues to warnings list.
+    """
+    stream_url = get_stream_url(url)
+    if not stream_url:
+        msg = "Could not fetch stream URL. No screenshots extracted."
+        warnings.append(msg)
+        print(f"ERROR: {msg}", file=sys.stderr)
+        return []
+
+    out_dir = os.path.join("yt-screenshots", slug)
+    os.makedirs(out_dir, exist_ok=True)
+
+    results = []
+    for i, ts in enumerate(timestamps, 1):
+        chapter_title = get_chapter_for_timestamp(ts, chapters)
+        ts_file = format_timestamp_filename(ts)
+
+        if chapter_title:
+            chapter_slug = slugify(chapter_title, 40)
+            filename = f"{i:03d}_{ts_file}_{chapter_slug}.png"
+        else:
+            filename = f"{i:03d}_{ts_file}.png"
+
+        filepath = os.path.join(out_dir, filename)
+
+        # -y -loglevel BEFORE -ss; -ss BEFORE -i for fast input seeking
+        cmd = [
+            "ffmpeg",
+            "-y", "-loglevel", "error",
+            "-ss", str(int(ts)),
+            "-i", stream_url,
+            "-frames:v", "1",
+            filepath,
+        ]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if proc.returncode == 0 and os.path.exists(filepath):
+                results.append((ts, filepath))
+            else:
+                err = proc.stderr.strip() if proc.stderr else "unknown error"
+                msg = f"Frame at {format_timestamp_display(ts)} failed: {err}"
+                warnings.append(msg)
+                print(f"WARNING: {msg}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            msg = f"Frame at {format_timestamp_display(ts)} timed out (>60s)"
+            warnings.append(msg)
+            print(f"WARNING: {msg}", file=sys.stderr)
+
+    return results
+
+
+def embed_screenshots_in_transcript(
+    segments: list[tuple[float, str]],
+    screenshots: list[tuple[float, str]],
+    chapters: list[dict],
+) -> str:
+    """Insert screenshot references into transcript text at matching positions."""
+    if not segments:
+        return ""
+
+    # Map each screenshot to the last segment with start_time <= ts
+    # (the segment that is "speaking" at the screenshot moment)
+    screenshot_map: dict[int, list[str]] = {}
+    for ts, filepath in screenshots:
+        best_idx = 0
+        for idx, (seg_ts, _) in enumerate(segments):
+            if seg_ts <= ts:
+                best_idx = idx
+            else:
+                break
+
+        rel_path = filepath.replace("\\", "/")
+        chapter_title = get_chapter_for_timestamp(ts, chapters)
+        ts_display = format_timestamp_display(ts)
+
+        if chapter_title:
+            alt = f"{ts_display} — {chapter_title}"
+        else:
+            alt = ts_display
+
+        ref = f"\n\n![{alt}]({rel_path})\n\n"
+        screenshot_map.setdefault(best_idx, []).append(ref)
+
+    # Build enriched transcript
+    parts = []
+    for idx, (_, text) in enumerate(segments):
+        if idx in screenshot_map:
+            for ref in screenshot_map[idx]:
+                parts.append(ref)
+        parts.append(text + " ")
+
+    return "".join(parts).strip()
+
+
+# --- Main ---
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract YouTube video data")
+    parser.add_argument("url", help="YouTube URL")
+    parser.add_argument("--comments", action="store_true", help="Also fetch top comments")
+    parser.add_argument(
+        "--screenshots", nargs="?", const="auto", default=None,
+        help="Extract screenshots. Without value: use chapter markers. "
+             "With comma-separated timestamps: 0:30,2:15,5:00",
+    )
+    args = parser.parse_args()
+
+    url = args.url
+
+    # Step 1: Metadata
+    meta = extract_metadata(url)
+    if not meta:
+        print(f"ERROR: Could not fetch metadata for {url}")
+        sys.exit(1)
+
+    # Step 2: Transcript
+    transcript, sub_hint, segments = download_and_process_vtt(url, meta["id"])
+
+    # Step 3: Comments (optional)
+    comments = []
+    if args.comments:
+        comments = fetch_comments(url)
+
+    # Step 4: Screenshots (optional)
+    screenshots = []
+    screenshot_warnings: list[str] = []
+    screenshot_requested = 0
+    screenshot_dir = ""
+    screenshot_marker = ""  # "FFMPEG_MISSING" or "SCREENSHOTS_ASK_USER"
+    if args.screenshots is not None:
+        if not check_ffmpeg():
+            screenshot_marker = "FFMPEG_MISSING"
+            screenshot_warnings.append("ffmpeg not found — no screenshots extracted.")
+        else:
+            timestamps = resolve_timestamps(
+                args.screenshots, meta["chapters"], meta["duration"],
+                screenshot_warnings,
+            )
+            if timestamps == "ASK_USER":
+                screenshot_marker = "SCREENSHOTS_ASK_USER"
+            elif timestamps:
+                screenshot_requested = len(timestamps)
+                slug = slugify(meta["title"])
+                screenshots = extract_screenshots(
+                    url, timestamps, slug, meta["chapters"],
+                    screenshot_warnings,
+                )
+                screenshot_dir = os.path.join("yt-screenshots", slug).replace("\\", "/")
+
+    # --- Output structured markdown ---
+
+    print("### Metadata")
+    print(f"title: {meta['title']}")
+    print(f"channel: {meta['channel']}")
+    print(f"date: {format_date(meta['upload_date'])}")
+    print(f"duration: {meta['duration_string']}")
+    print(f"duration_seconds: {meta['duration']}")
+    print(f"views: {meta['view_count']}")
+    print(f"likes: {meta['like_count']}")
+    print(f"is_live: {meta['is_live']}")
+    print(f"was_live: {meta['was_live']}")
+    print()
+
+    print("### Description")
+    print(filter_description(meta["description"]))
+    print()
+
+    if meta["chapters"]:
+        print("### Chapters")
+        for ch in meta["chapters"]:
+            ts_display = format_timestamp_display(ch["start_time"])
+            print(f"- [{ts_display}] {ch['title']}")
+        print()
+
+    print("### Transcript Info")
+    print(sub_hint)
+    if meta["duration"] and meta["duration"] > 3600:
+        print(f"Video is {meta['duration'] // 60} min long — full transcript")
+    print()
+
+    print("### Transcript")
+    if transcript:
+        if screenshots and segments:
+            enriched = embed_screenshots_in_transcript(
+                segments, screenshots, meta["chapters"]
+            )
+            print(enriched)
+        else:
+            print(transcript)
+    else:
+        print("No transcript available.")
+    print()
+
+    if args.screenshots is not None:
+        print("### Screenshots")
+        if screenshot_marker == "FFMPEG_MISSING":
+            print("FFMPEG_MISSING")
+        elif screenshot_marker == "SCREENSHOTS_ASK_USER":
+            print("SCREENSHOTS_ASK_USER")
+            print(f"video_duration: {meta['duration']}")
+        else:
+            if screenshot_dir:
+                print(f"screenshot_dir: {screenshot_dir}")
+            for ts, filepath in screenshots:
+                chapter_title = get_chapter_for_timestamp(ts, meta["chapters"])
+                ts_display = format_timestamp_display(ts)
+                rel_path = filepath.replace("\\", "/")
+                if chapter_title:
+                    print(f"- ![{ts_display} — {chapter_title}]({rel_path}) {ts_display} — {chapter_title}")
+                else:
+                    print(f"- ![{ts_display}]({rel_path}) {ts_display}")
+        print()
+
+        print("### Screenshot Status")
+        if screenshot_marker:
+            print(screenshot_marker)
+        elif screenshot_requested > 0:
+            success = len(screenshots)
+            if success == screenshot_requested:
+                print(f"{success} screenshots requested, {success} successfully extracted.")
+            else:
+                print(f"{screenshot_requested} screenshots requested, {success} successfully extracted.")
+        if screenshot_warnings:
+            for w in screenshot_warnings:
+                print(f"- WARNING: {w}")
+        print()
+
+    print("### Comments")
+    if not args.comments:
+        print("SKIPPED")
+    elif comments:
+        for i, c in enumerate(comments, 1):
+            print(f"{i}. **{c['author']}** (👍 {c['likes']}) — {c['text']}")
+    else:
+        print("Comments not available.")
+
+
+if __name__ == "__main__":
+    main()

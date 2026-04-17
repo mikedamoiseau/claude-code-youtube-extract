@@ -1,0 +1,11 @@
+{
+  "name": "yt-extract",
+  "description": "Extract transcripts, metadata, screenshots, and comments from YouTube videos — all in one Claude Code command",
+  "version": "1.1.0",
+  "author": {
+    "name": "Mucky / buzzwoo"
+  },
+  "repository": "https://github.com/muckybuzzwoo/claude-code-youtube-extract",
+  "license": "Apache-2.0",
+  "keywords": ["youtube", "transcript", "extraction", "video", "yt-dlp", "ffmpeg"]
+}
