@@ -55,6 +55,24 @@ def emit_stage(current: int, total: int, text: str) -> None:
     print(f"[{current}/{total}] {text}", file=sys.stderr, flush=True)
 
 
+def strip_overlap(prev_text: str, next_text: str) -> str:
+    """Return next_text with the longest word-prefix also present as word-suffix
+    of prev_text stripped off. Used to collapse YouTube rolling-caption
+    overlaps (each cue repeats the tail of the previous cue).
+
+    Word-level comparison: 'Hello world' overlapping with 'world today' yields
+    'today'. Idempotent for non-overlapping inputs (no strip, next_text returned
+    verbatim).
+    """
+    prev_words = prev_text.split()
+    next_words = next_text.split()
+    max_k = min(len(prev_words), len(next_words))
+    for k in range(max_k, 0, -1):
+        if prev_words[-k:] == next_words[:k]:
+            return " ".join(next_words[k:])
+    return next_text
+
+
 def format_timestamp_display(seconds: float) -> str:
     """Format seconds as M:SS or H:MM:SS for display."""
     s = int(seconds)
@@ -178,11 +196,28 @@ def download_and_process_vtt(url: str, video_id: str) -> tuple[str, str, list[tu
     segments = []
     current_start = 0.0
     current_lines = []
-    text_lines = []
+    in_metadata_block = False  # NOTE/STYLE blocks span until next blank line
 
     for line in content.split("\n"):
         line = line.strip()
-        if not line or line.startswith("WEBVTT") or re.match(r"^\d+$", line):
+
+        # Blank line: end any open NOTE/STYLE block
+        if not line:
+            in_metadata_block = False
+            continue
+        # WebVTT header + file-level metadata fields
+        if line.startswith("WEBVTT"):
+            continue
+        if re.match(r"^(Kind|Language):\s", line):
+            continue
+        # NOTE / STYLE blocks span lines until the next blank line
+        if line.startswith("NOTE") or line.startswith("STYLE"):
+            in_metadata_block = True
+            continue
+        if in_metadata_block:
+            continue
+        # Cue identifier lines (pure digits)
+        if re.match(r"^\d+$", line):
             continue
 
         # Parse VTT timestamp lines: 00:02:15.000 --> 00:02:18.500
@@ -206,27 +241,28 @@ def download_and_process_vtt(url: str, video_id: str) -> tuple[str, str, list[tu
         clean = re.sub(r"<[^>]+>", "", line).strip()
         if clean:
             current_lines.append(clean)
-            text_lines.append(clean)
 
     # Don't forget the last segment
     if current_lines:
         segments.append((current_start, " ".join(current_lines)))
 
-    # Deduplicate consecutive identical lines (auto-caption overlap)
-    deduped = []
-    for line in text_lines:
-        if deduped and deduped[-1] == line:
+    # Cue-based rolling-overlap dedup.
+    # YouTube auto-captions emit a 3-line rolling window where each cue repeats
+    # the tail of the previous cue. The fix: for each new cue, strip the longest
+    # word-prefix that matches the suffix of the already-accumulated text. One
+    # pass catches both [A,B,C] -> [B,C,D] overlaps and fully-redundant cues.
+    deduped_segments: list[tuple[float, str]] = []
+    for start, text in segments:
+        if not deduped_segments:
+            deduped_segments.append((start, text))
             continue
-        deduped.append(line)
+        _, prev_text = deduped_segments[-1]
+        stripped = strip_overlap(prev_text, text).strip()
+        if stripped:
+            deduped_segments.append((start, stripped))
+        # else: this cue was entirely contained in the previous one — drop it.
 
-    # Deduplicate consecutive identical segments
-    deduped_segments = []
-    for seg in segments:
-        if deduped_segments and deduped_segments[-1][1] == seg[1]:
-            continue
-        deduped_segments.append(seg)
-
-    transcript = " ".join(deduped)
+    transcript = " ".join(text for _, text in deduped_segments).strip()
 
     # Cleanup temp files
     for f in glob.glob(f"{prefix}*"):
@@ -410,20 +446,79 @@ def extract_screenshots(
     return results
 
 
-def embed_screenshots_in_transcript(
+def _is_chapter_aligned(
+    screenshots: list[tuple[float, str]],
+    chapters: list[dict],
+) -> bool:
+    """True when there is exactly one screenshot per chapter and their
+    timestamps line up within 1s. Used to pick the rendering strategy.
+    """
+    if not screenshots or not chapters or len(screenshots) != len(chapters):
+        return False
+    return all(
+        abs(ss_ts - ch.get("start_time", -1)) < 1.0
+        for (ss_ts, _), ch in zip(screenshots, chapters)
+    )
+
+
+def _chapter_end_time(chapters: list[dict], idx: int) -> float:
+    """Return the end time for chapter idx — fall back to the next chapter's
+    start, then to +∞ for the last chapter. yt-dlp usually supplies end_time,
+    but this stays defensive in case it is missing.
+    """
+    ch = chapters[idx]
+    end = ch.get("end_time")
+    if end is not None:
+        return float(end)
+    if idx + 1 < len(chapters):
+        return float(chapters[idx + 1].get("start_time", float("inf")))
+    return float("inf")
+
+
+def _render_chapter_structured(
     segments: list[tuple[float, str]],
     screenshots: list[tuple[float, str]],
     chapters: list[dict],
 ) -> str:
-    """Insert screenshot references into transcript text at matching positions.
-    screenshots is [(ts, filename), ...] — filenames are resolved against the
-    sibling `screenshots/` folder where the markdown will live.
+    """Transcript layout for chapter-aligned runs: one h3 block per chapter,
+    screenshot right after the heading, then all transcript segments whose
+    timestamp falls inside the chapter's interval.
+    """
+    parts: list[str] = []
+    for i, chapter in enumerate(chapters):
+        ch_start = float(chapter.get("start_time", 0.0))
+        ch_end = _chapter_end_time(chapters, i)
+        ch_title = chapter.get("title", "").strip()
+        _, ss_filename = screenshots[i]
+        ts_display = format_timestamp_display(ch_start)
+
+        heading = f"### [{ts_display}] {ch_title}" if ch_title else f"### [{ts_display}]"
+        alt = f"{ts_display} — {ch_title}" if ch_title else ts_display
+
+        parts.append(f"\n\n{heading}\n\n")
+        parts.append(f"![{alt}](screenshots/{ss_filename})\n\n")
+
+        for seg_ts, seg_text in segments:
+            if ch_start <= seg_ts < ch_end:
+                parts.append(seg_text + " ")
+
+    return "".join(parts).strip()
+
+
+def _render_inline_with_heading(
+    segments: list[tuple[float, str]],
+    screenshots: list[tuple[float, str]],
+    chapters: list[dict],
+) -> str:
+    """Fallback layout when the run is not chapter-aligned (custom timestamps,
+    no chapters, or count mismatch). Each screenshot gets an h3 heading just
+    before the image so readers see the timestamp context in full-transcript
+    mode. If the timestamp happens to fall inside a chapter, the chapter title
+    is appended to the heading after an em-dash.
     """
     if not segments:
         return ""
 
-    # Map each screenshot to the last segment with start_time <= ts
-    # (the segment that is "speaking" at the screenshot moment)
     screenshot_map: dict[int, list[str]] = {}
     for ts, filename in screenshots:
         best_idx = 0
@@ -433,20 +528,20 @@ def embed_screenshots_in_transcript(
             else:
                 break
 
-        rel_path = f"screenshots/{filename}"
         chapter_title = get_chapter_for_timestamp(ts, chapters)
         ts_display = format_timestamp_display(ts)
 
         if chapter_title:
+            heading = f"### [{ts_display}] — {chapter_title}"
             alt = f"{ts_display} — {chapter_title}"
         else:
+            heading = f"### [{ts_display}]"
             alt = ts_display
 
-        ref = f"\n\n![{alt}]({rel_path})\n\n"
+        ref = f"\n\n{heading}\n\n![{alt}](screenshots/{filename})\n\n"
         screenshot_map.setdefault(best_idx, []).append(ref)
 
-    # Build enriched transcript
-    parts = []
+    parts: list[str] = []
     for idx, (_, text) in enumerate(segments):
         if idx in screenshot_map:
             for ref in screenshot_map[idx]:
@@ -454,6 +549,30 @@ def embed_screenshots_in_transcript(
         parts.append(text + " ")
 
     return "".join(parts).strip()
+
+
+def embed_screenshots_in_transcript(
+    segments: list[tuple[float, str]],
+    screenshots: list[tuple[float, str]],
+    chapters: list[dict],
+) -> str:
+    """Insert screenshots into the transcript. Picks between two layouts:
+
+    - Chapter-structured (one screenshot per chapter, timestamps aligned):
+      ``### [HH:MM] Chapter Title`` heading, image, segments of that chapter.
+    - Inline-with-heading fallback (custom timestamps or mismatch): the
+      existing inline insert, but each image is preceded by its own
+      ``### [HH:MM]`` heading for scannability.
+
+    screenshots is [(ts, filename), ...] — filenames resolved against the
+    sibling ``screenshots/`` folder where the markdown will live.
+    """
+    if not segments:
+        return ""
+
+    if _is_chapter_aligned(screenshots, chapters):
+        return _render_chapter_structured(segments, screenshots, chapters)
+    return _render_inline_with_heading(segments, screenshots, chapters)
 
 
 # --- Main ---

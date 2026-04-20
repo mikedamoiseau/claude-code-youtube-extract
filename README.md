@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.3.0-blue">
   <img alt="claude-code" src="https://img.shields.io/badge/Claude%20Code-plugin-purple">
   <img alt="license" src="https://img.shields.io/badge/license-Apache%202.0-green">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
@@ -27,7 +27,7 @@ Tutorial videos are trapped knowledge. The content is valuable, but it sits behi
 
 | Type  | Name         | Version | Description                                                                 |
 |-------|--------------|---------|-----------------------------------------------------------------------------|
-| Skill | `yt-extract` | 1.2.0   | Extract transcripts, metadata, screenshots, and comments from YouTube videos |
+| Skill | `yt-extract` | 1.3.0   | Extract transcripts, metadata, screenshots, and comments from YouTube videos |
 
 This plugin has no dependencies on other Claude Code plugins.
 
@@ -230,9 +230,10 @@ Screenshots land in two places: **embedded inside the transcript** at their matc
 
 | Mode | Where screenshots appear in the saved file |
 |---|---|
-| `--screenshots` at chapter markers (default — no explicit timestamps) | Embedded inline **under each `## Chapters` entry** (1:1 mapping). The standalone `## Screenshots` section is suppressed to avoid duplication. |
-| `--screenshots 0:30,2:15,...` (custom timestamps) | Standalone `## Screenshots` section at the bottom (no chapter alignment possible). |
-| `--full-transcript` + `--screenshots` | Embedded inline in the transcript at matching timestamps; standalone `## Screenshots` section also kept. |
+| Summary + `--screenshots` at chapter markers (default) | Embedded inline **under each `## Chapters` entry** (1:1 mapping). The standalone `## Screenshots` section is suppressed. |
+| Summary + `--screenshots 0:30,2:15,...` (custom timestamps) | Standalone `## Screenshots` section at the bottom (no chapter alignment possible). |
+| `--full-transcript` + `--screenshots` at chapter markers | Transcript is pre-structured as `### [HH:MM] Chapter Title` h3 blocks — each heading is followed by the matching screenshot and the transcript text for that interval. `## Chapters` renders as a plain TOC. Standalone `## Screenshots` section is suppressed. |
+| `--full-transcript` + `--screenshots` at custom timestamps | Each screenshot is embedded inline in the transcript with a preceding `### [HH:MM]` h3 heading (or `### [HH:MM] — Chapter Title` if the timestamp happens to fall inside a chapter). Standalone `## Screenshots` section is suppressed. |
 
 The `## Screenshot Status` line (`"N screenshots requested, M successfully extracted"`) is always rendered when `--screenshots` was used, regardless of which mode.
 
@@ -509,4 +510,4 @@ Good first issues: additional install methods (e.g. `choco` on Windows, `snap` o
 
 ---
 
-Version: 1.2.0 — [Changelog](CHANGELOG.md)
+Version: 1.3.0 — [Changelog](CHANGELOG.md)

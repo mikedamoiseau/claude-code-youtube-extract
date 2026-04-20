@@ -386,7 +386,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 ## Chapters
 [If present: list of chapter markers with timestamps.]
-[**Chapter-aligned screenshot embedding:** If `--screenshots` was set AND the number of screenshots in the subagent's `### Screenshots` section equals the number of chapter markers AND each screenshot's timestamp matches a chapter timestamp → embed the screenshot IMMEDIATELY below its matching chapter line, indented with 2 spaces. Use the image reference from the subagent's `### Screenshots` section verbatim. Format:]
+[**Chapter-aligned screenshot embedding (SUMMARY MODE ONLY)**: If `--full-transcript` was NOT set AND `--screenshots` WAS set AND the number of screenshots equals the number of chapter markers AND each screenshot's timestamp matches a chapter timestamp → embed the screenshot IMMEDIATELY below its matching chapter line, indented with 2 spaces. Format:]
 
 ```
 - [0:00] Intro
@@ -398,6 +398,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
   ![Docker install](screenshots/002_02m15s_docker.png)
 ```
 
+[**In `--full-transcript` mode**: OMIT all images from this section — the transcript section below contains them as structured h3 blocks (heading + image + text). Render the Chapters section as a plain TOC of timestamps and titles only.]
 [If chapters are not present: omit the section entirely.]
 
 ---
@@ -415,8 +416,10 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 ## Screenshots
 [**Conditional rendering:**]
-[• If screenshots are chapter-aligned (already embedded under `## Chapters` above): OMIT this section entirely to avoid duplication. The chapter embedding replaces it.]
-[• If screenshots are NOT chapter-aligned (custom timestamps, or no chapters, or count mismatch): render the standalone list with image references and timestamps — from the subagent's `### Screenshots` section UNCHANGED.]
+[• In `--full-transcript` mode with chapter-aligned screenshots: OMIT — already embedded as h3 blocks inside `## Transcript`.]
+[• In `--full-transcript` mode with custom-timestamp screenshots: OMIT — already embedded with h3 headings inside `## Transcript`.]
+[• In summary mode with chapter-aligned screenshots: OMIT — already embedded under `## Chapters` above.]
+[• In summary mode with NON-chapter-aligned screenshots (custom timestamps, or no chapters, or count mismatch): render the standalone list with image references and timestamps — from the subagent's `### Screenshots` section UNCHANGED.]
 [• If `--screenshots` was requested but produced nothing: > ℹ️ No screenshots extracted.]
 [• If `--screenshots` was not requested: omit the section.]
 
@@ -432,7 +435,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 [If error: > ℹ️ Comments could not be loaded.]
 ```
 
-**With --full-transcript:** the section is called `## Transcript` and shows the raw prose with embedded screenshot references (as before). No hint about --full-transcript needed.
+**With --full-transcript:** the section is called `## Transcript`. When `--screenshots` is also set, the Python script pre-structures the transcript with `### [HH:MM] Chapter Title` h3 sub-headings (for chapter-aligned runs) or `### [HH:MM]` h3 sub-headings (for custom timestamps) — each heading is immediately followed by the matching screenshot and then the transcript text for that interval. Use the subagent's output verbatim; no further reformatting needed. No hint about --full-transcript needed.
 
 ### With 2 or 3 URLs:
 
@@ -448,7 +451,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 [from subagent]
 
 ### Chapters
-[If present: apply the same chapter-aligned screenshot embedding rule as single-video mode — when `--screenshots` count matches chapter count and timestamps align, embed each screenshot indented below its matching chapter line.]
+[If present: apply the same chapter-aligned screenshot embedding rule as single-video mode — summary mode only: embed screenshots indented below each matching chapter line. In `--full-transcript` mode: render as plain TOC, the screenshots live in the Transcript section instead.]
 
 ### Transcript Summary
 [Info + structured summary]
@@ -480,7 +483,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 **Tools & resources mentioned:** [consolidated list of all links, tools, repos]
 ```
 
-**With --full-transcript:** sections are called `### Transcript` and show the raw prose with embedded screenshot references.
+**With --full-transcript (multi-URL):** sections are called `### Transcript`. The subagent's transcript output already contains `### [HH:MM] ...` h3 sub-headings emitted by the Python script. To keep the heading hierarchy correct under the surrounding `### Transcript` heading, **apply a one-pass demote** on each subagent's transcript text before inserting it into the consolidated MD: replace every occurrence of `^### ` (start-of-line hash-hash-hash-space) with `#### `. This shifts the chapter sub-headings to h4 so they render as proper children of `### Transcript`.
 
 ---
 
