@@ -16,20 +16,37 @@ subagent per URL for transcript summarization.
 | Skill  | `skills/yt-extract/SKILL.md`  | User-invocable workflow (`/yt-extract`)   |
 | Script | `scripts/yt-extract.py`       | Python backend — yt-dlp + ffmpeg + VTT    |
 
-Current version: **1.1.0** — see [CHANGELOG.md](CHANGELOG.md).
+Current version: **1.2.0** — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Architectural conventions
 
 - **Script invocation:** Always call the Python script via `${CLAUDE_PLUGIN_ROOT}/scripts/yt-extract.py`. Never use absolute or home-relative paths — the plugin must work regardless of install location.
 - **Language:** All user-facing output (SKILL.md body, script stdout, README, CHANGELOG) is in English. Do not mix languages.
 - **Section headers:** The Python script emits a fixed set of Markdown section headers (`### Metadata`, `### Description`, `### Chapters`, `### Transcript Info`, `### Transcript`, `### Screenshots`, `### Screenshot Status`, `### Comments`). The SKILL.md subagent prompts parse these verbatim. If you rename a header, update both sides.
-- **Sentinel markers:** `FFMPEG_MISSING` and `SCREENSHOTS_ASK_USER` are the only non-content strings inside the `### Screenshots` section. `SCREENSHOTS_ASK_USER` is reacted to by the subagent (missing chapter markers). `FFMPEG_MISSING` is emitted by the Python script for defense-in-depth but is normally unreachable since v1.1.0 — ffmpeg presence is verified in Step 0.5 before subagent dispatch. Do not introduce new sentinels without updating the skill's marker-handling block.
+- **Sentinel markers and orchestration trailers:**
+  - Inside the `### Screenshots` section: `FFMPEG_MISSING` (defensive — Step 0.5 normally prevents this) and `SCREENSHOTS_ASK_USER` (no chapters, no explicit timestamps → subagent asks user for strategy).
+  - Stderr on exit code 2: `FOLDER_EXISTS: <path>` — target folder exists and `--force` was not passed. The subagent prompts the user and re-runs with `--force`.
+  - Trailing stdout line on every successful run: `OUTPUT_FOLDER: <path>` — tells the skill where the script's target folder lives. Uses forward slashes. The skill trims this line from the markdown before writing the `.md`.
+  - Do not introduce new sentinels or trailers without updating the skill's handling block AND this list.
+- **Stage markers on stderr:** The script emits `[k/N] <stage>` lines on stderr (flushed immediately) — metadata, transcript, comments (optional), screenshots (optional), output. `N` is adaptive based on enabled flags. Subagent prompts tell subagents to forward these to the main chat as one-line updates.
+- **Script owns output folder layout:** Since v1.2.0, the Python script creates the `yt-extract_<DATE>_<slug>/` folder and the `screenshots/` subfolder inside it directly. The skill does **not** do `mkdir`, `mv`, or `rmdir` for per-video layout. For multi-URL runs the skill creates the shared parent (`yt-extract_<DATE>_<N>-videos/`) before dispatch and passes it as `--output-base`.
 - **Subagent dispatch:** Multi-URL runs dispatch one subagent per URL in parallel (single message, multiple Agent-tool calls). Preserve this pattern — sequential dispatch multiplies latency.
+
+## Script CLI (internal, skill-facing)
+
+The skill always passes these flags on dispatch — users never type them directly:
+
+| Flag                | Purpose                                                                                             |
+|---------------------|-----------------------------------------------------------------------------------------------------|
+| `--output-base <d>` | Base directory. Script creates `<d>/yt-extract_<DATE>_<slug>/`. Default: `.` (CWD).                 |
+| `--force`           | Overwrite an existing target folder. Without it, script exits `2` with `FOLDER_EXISTS:` on stderr.  |
+
+User-facing flags (`--comments`, `--screenshots [timestamps]`, `--full-transcript`, `--no-save`, `--check`) are parsed by the skill in Step 0.4, translated to their script equivalents where relevant, and passed down.
 
 ## Out-of-scope changes
 
 - **No hooks, no MCP servers, no other skills.** Keep the plugin to one skill + one script. If functionality must grow, propose splitting into a separate plugin.
-- **Do not rename output folder schemes** (`yt-extract_DATE_slug/`) without a migration note in CHANGELOG — downstream users may grep their filesystem for these.
+- **Do not rename output folder schemes** (`yt-extract_DATE_slug/` for single-URL, `yt-extract_DATE_N-videos/` parent with nested per-video folders for multi-URL) without a migration note in CHANGELOG — downstream users may grep their filesystem for these. The multi-URL layout changed in v1.2.0 (per-video folders instead of flat `screenshots/slug/`); any further change is a breaking change.
 
 ## Testing
 

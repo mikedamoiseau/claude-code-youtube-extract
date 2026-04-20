@@ -96,6 +96,8 @@ Split $ARGUMENTS on whitespace/newlines. Keep only strings starting with `https:
 
 If `--screenshots` was **not** parsed, skip this step entirely.
 
+**Narration:** Before running the check, say in chat: "Verifying ffmpeg before screenshot extraction..." — so the user sees what is happening.
+
 Otherwise, run:
 ```bash
 ffmpeg -version 2>&1
@@ -263,9 +265,31 @@ Ready to extract. Run `/yt-extract <url>` to analyze a video.
 
 **IMPORTANT: Use the Agent tool (subagent_type: general-purpose, model: "sonnet") for each URL. With 2-3 URLs, dispatch all in parallel (in a single message with multiple Agent-tool calls).**
 
+### Narration before dispatch
+
+Before the Agent-tool call(s), say in chat what is about to happen. One short line is enough — the user has no other signal that work has started.
+
+- **1 URL:** `Extracting from <shortened URL or known title>. This typically takes 30–60 seconds...`
+- **2-3 URLs:** `Dispatching <N> parallel extractions...`
+
+As each subagent returns, announce its result on one line (`URL <i>/<N> done: <OUTPUT_FOLDER>` or similar). This, combined with the `[k/N]` stage markers the Python script emits on stderr, gives the user continuous feedback even when an individual run runs long.
+
+### `--output-base` resolution
+
+Every subagent invocation must include `--output-base <path>`. The value depends on URL count:
+
+- **1 URL:** `--output-base "."` — script creates `./yt-extract_[DATE]_[slug]/` directly in CWD.
+- **2-3 URLs:** `--output-base "./yt-extract_[DATE]_[N]-videos"` — **before** dispatching subagents, create this parent folder with `mkdir -p`. Each subagent's script then writes into `./yt-extract_[DATE]_[N]-videos/yt-extract_[DATE]_[slug]/`.
+
+When the parent folder (multi-URL case) already exists, ask the user via AskUserQuestion "Folder `<path>` already exists. Overwrite?" **before** creating it. On "yes": remove the existing folder (`rm -rf`) and re-create, then dispatch subagents **with `--force`** appended to each script invocation so per-video collisions inside the parent are also overwritten silently. On "no": abort the skill with a short message.
+
+### FOLDER_EXISTS handling (per-subagent)
+
+If a subagent reports that the Python script exited with code 2 and stderr contained `FOLDER_EXISTS: <path>`, the per-video folder already exists from a previous run. The subagent prompt instructs it to resolve this via its own AskUserQuestion and re-run with `--force`. In the rare multi-URL case where multiple subagents hit this simultaneously, multiple prompts may surface — acceptable for now (documented in CHANGELOG under "Known limitations").
+
 ### When --full-transcript is NOT set (default):
 
-Each subagent gets this prompt (substitute URL and flags):
+Each subagent gets this prompt (substitute URL, flags, and `--output-base` path per Step 1 resolution rules above):
 
 ---
 
@@ -273,16 +297,22 @@ Extract all data for this YouTube video and summarize the transcript.
 
 1. Run:
 ```bash
-<PY> "${CLAUDE_PLUGIN_ROOT}/scripts/yt-extract.py" "[URL]" [--comments if requested] [--screenshots if requested, with optional timestamps]
+<PY> "${CLAUDE_PLUGIN_ROOT}/scripts/yt-extract.py" "[URL]" --output-base "[OUTPUT_BASE]" [--force if the orchestrator said so] [--comments if requested] [--screenshots if requested, with optional timestamps]
 ```
 
+**Progress surfacing (stderr stage markers):** The Python script emits lines like `[1/5] Fetching metadata...`, `[2/5] Downloading transcript...`, `[3/5] Extracting 7 screenshots...` on stderr, flushed immediately. When each stage completes, surface the marker as a one-line update in your returned message so the user sees forward motion during long runs.
+
+**FOLDER_EXISTS handling (exit code 2):** If the Bash command exits with code 2 AND stderr contains `FOLDER_EXISTS: <path>`, the target folder already exists. Ask the user via AskUserQuestion: `Folder "[path]" already exists. Overwrite?` with options "Yes, overwrite" and "No, abort". On Yes: re-run the exact same Bash command with `--force` appended. On No: return a short message "User declined overwrite for [URL]" and stop this subagent (the orchestrator will treat it as a failed extraction).
+
 2. **Check the `### Screenshots` section for `SCREENSHOTS_ASK_USER`:**
-   - If `SCREENSHOTS_ASK_USER` appears in the `### Screenshots` section: The video has no chapter markers. Ask the user via AskUserQuestion: "This video has no chapter markers. How should screenshots be taken?" with options: A) "Evenly distributed (1 per 2 min, max 10)" B) "Enter manual timestamps". On A: compute timestamps based on `video_duration` from the `### Screenshots` section, build a comma-separated list, re-run the script with `--screenshots T1,T2,T3,...`. On B: wait for user input, re-run the script with the entered timestamps. IMPORTANT: When re-running the script, DISCARD the first run's output entirely and replace it with the new one.
+   - If `SCREENSHOTS_ASK_USER` appears in the `### Screenshots` section: The video has no chapter markers. Ask the user via AskUserQuestion: "This video has no chapter markers. How should screenshots be taken?" with options: A) "Evenly distributed (1 per 2 min, max 10)" B) "Enter manual timestamps". On A: compute timestamps based on `video_duration` from the `### Screenshots` section, build a comma-separated list, re-run the script with `--screenshots T1,T2,T3,...` **and `--force`** (the first run already created the target folder). On B: wait for user input, re-run with the entered timestamps and `--force`. IMPORTANT: When re-running, DISCARD the first run's output entirely and replace it with the new one.
    - `FFMPEG_MISSING` should not appear at this stage — Step 0.5 already verified ffmpeg presence before dispatch. If it does appear (defense-in-depth), treat it as a hard error and surface the message from Step 0.6.E to the user.
 
 3. Return the **Metadata**, **Description**, **Chapters** (if present), and **Comments** sections UNCHANGED.
 
-4. Return the **Screenshots** and **Screenshot Status** sections (if present) UNCHANGED — they contain relative image paths and error/success messages that must be preserved.
+4. Return the **Screenshots** and **Screenshot Status** sections (if present) UNCHANGED — they contain relative image paths (like `screenshots/NNN_HHmmss.png`) and error/success messages that must be preserved.
+
+**Preserve the trailing `OUTPUT_FOLDER: <path>` line** that the script emits after the Comments section. The orchestrator parses this to decide where to write the consolidated markdown. Return it verbatim at the end of your response.
 
 5. Replace the raw transcript with a **STRUCTURED SUMMARY**:
    - Keep the **Transcript Info** (auto-generated/manual, language) as the first line
@@ -316,7 +346,7 @@ Extract all data for this YouTube video and summarize the transcript.
 
 ### When --full-transcript IS set:
 
-Each subagent gets this prompt (as before):
+Each subagent gets this prompt (substitute URL, flags, and `--output-base` path per Step 1 resolution rules above):
 
 ---
 
@@ -324,12 +354,16 @@ Extract all data for this YouTube video. Return exclusively the output of the Py
 
 Run exactly this one command:
 ```bash
-<PY> "${CLAUDE_PLUGIN_ROOT}/scripts/yt-extract.py" "[URL]" [--comments if requested] [--screenshots if requested, with optional timestamps]
+<PY> "${CLAUDE_PLUGIN_ROOT}/scripts/yt-extract.py" "[URL]" --output-base "[OUTPUT_BASE]" [--force if the orchestrator said so] [--comments if requested] [--screenshots if requested, with optional timestamps]
 ```
 
-**Check the `### Screenshots` section for `SCREENSHOTS_ASK_USER`** (identical to default mode): ask user for timestamps, re-run the script, discard the first output entirely and replace it with the new one. `FFMPEG_MISSING` is handled in Step 0.5 before dispatch and should not appear here.
+**Progress surfacing:** The script emits `[k/N]` stage markers on stderr throughout the run. Surface each one as a one-line update so the user sees forward motion.
 
-Return the complete script output as the answer. Add nothing, omit nothing. Screenshot image references inside the transcript and the `### Screenshot Status` section are preserved.
+**FOLDER_EXISTS handling (exit code 2):** If the command exits with code 2 AND stderr contains `FOLDER_EXISTS: <path>`, ask the user via AskUserQuestion: `Folder "[path]" already exists. Overwrite?` with options "Yes, overwrite" and "No, abort". On Yes: re-run with `--force` appended. On No: return "User declined overwrite for [URL]" and stop.
+
+**Check the `### Screenshots` section for `SCREENSHOTS_ASK_USER`** (identical to default mode): ask user for timestamps, re-run the script **with `--force` appended** (first run already created the folder), discard the first output entirely and replace it with the new one. `FFMPEG_MISSING` is handled in Step 0.5 before dispatch and should not appear here.
+
+Return the complete script output as the answer — including the trailing `OUTPUT_FOLDER: <path>` line, which the orchestrator needs to locate the target folder. Add nothing, omit nothing. Screenshot image references inside the transcript and the `### Screenshot Status` section are preserved.
 
 ---
 
@@ -454,15 +488,17 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 **Default behavior (auto-save):** The analysis is automatically saved as a Markdown file in its own folder. The output still appears in full in the chat.
 
-**With `--no-save`:** No automatic save. After the chat output, ask: "📁 Should I save the analysis as a Markdown file?" On "yes" → same flow as auto-save (including the Step 3.10 follow-up invitation at the end). On "no" → skip save but still emit the Step 3.10 follow-up invitation at the very end (with phrasing "The analysis is in context — you can ask me to:" since no file was saved).
+**With `--no-save`:** The Python script still runs normally and creates the target folder (it has to — screenshots and the OUTPUT_FOLDER trailer depend on it). After the chat output, ask: "📁 Should I save the analysis as a Markdown file?" On "yes" → same flow as auto-save (including the follow-up invitation at the end). On "no" → **remove the folder(s) the script created** with `rm -rf <OUTPUT_FOLDER>` (for 1 video) or `rm -rf ./yt-extract_[DATE]_[N]-videos/` (for multi-video), then emit the follow-up invitation at the very end (with phrasing "The analysis is in context — you can ask me to:" since no file was saved).
 
 ### Folder structure
+
+The Python script owns the per-video folder layout. The skill only orchestrates `--output-base` and, for multi-video runs, the parent folder + consolidated MD.
 
 **For 1 video:**
 ```
 ./yt-extract_[YYYY-MM-DD]_[slug]/
-  yt-extract_[YYYY-MM-DD]_[slug].md
-  screenshots/                          ← only when --screenshots is used
+  yt-extract_[YYYY-MM-DD]_[slug].md     ← written by the skill (from subagent output)
+  screenshots/                          ← created by the script, only with --screenshots
     001_00m30s_intro.png
     002_02m15s_installing-docker.png
 ```
@@ -470,11 +506,12 @@ Once all subagents have finished, parse the markdown blocks from the results and
 **For 2-3 videos:**
 ```
 ./yt-extract_[YYYY-MM-DD]_[N]-videos/
-  yt-extract_[YYYY-MM-DD]_[N]-videos.md
-  screenshots/                          ← only when --screenshots is used
-    [slug-video1]/
+  yt-extract_[YYYY-MM-DD]_[N]-videos.md     ← written by the skill (consolidated)
+  yt-extract_[YYYY-MM-DD]_[slug-video1]/    ← created by subagent 1's script
+    screenshots/
       001_00m30s.png
-    [slug-video2]/
+  yt-extract_[YYYY-MM-DD]_[slug-video2]/    ← created by subagent 2's script
+    screenshots/
       001_01m00s.png
 ```
 
@@ -483,19 +520,23 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 ### Auto-save flow
 
-1. **Determine folder name** from date + slug (1 video) or date + count (2-3 videos)
-2. **Check whether the folder already exists** → if yes: AskUserQuestion "Folder `[name]` already exists. Overwrite?"
-3. **Create folder** with `mkdir -p`
-4. **Move screenshots** (if present): Read the `screenshot_dir:` value from the `### Screenshots` section of the script output — that is the authoritative source path of the screenshot files. Move files from there → to `[analysis-folder]/screenshots/`. For multi-video: to `[analysis-folder]/screenshots/[slug]/`
-5. **Adjust image paths in the Markdown**: Replace the `screenshot_dir:` value and all paths starting with it by `screenshots/` (1 video) or `screenshots/[slug]/` (multi-video). Remove the `screenshot_dir:` line itself from the saved Markdown.
-6. **Prepend YAML frontmatter** (see below)
-7. **Write the MD file** with the Write tool into the analysis folder
-8. **Clean up the empty `yt-screenshots/` folder** (if it exists and is empty)
-9. **Show confirmation in chat:**
-   - With screenshots: `📁 Saved: [folder]/[file].md ([N] screenshots in screenshots/)` — **take `[N]` from the `### Screenshot Status` line that the script already printed (format: "`N screenshots requested, M successfully extracted`" — use `M`). Do NOT run a filesystem count to verify; the script is the source of truth.**
+The Python script creates the per-video folder and any screenshots inside it directly — no staging, no moves. The skill's job is three things: pass the right `--output-base` on dispatch, read the `OUTPUT_FOLDER:` trailer from subagent output, and write the consolidated markdown.
+
+1. **Read `OUTPUT_FOLDER: <path>` from each subagent's output.** This is always the last non-empty line the script emits. Trim it from the markdown before further processing — it is an orchestration marker, not analysis content. The path uses forward slashes and is relative to CWD.
+
+2. **Prepend YAML frontmatter** (see below) to the markdown.
+
+3. **Rewrite screenshot paths (multi-video only).** Per-video subagent output references screenshots as `screenshots/NNN_foo.png` (relative to the per-video folder). In the consolidated multi-video MD, rewrite each video's paths to `yt-extract_[DATE]_[slug]/screenshots/NNN_foo.png` (relative to the parent folder where the consolidated MD lives). Use the slug from that video's OUTPUT_FOLDER. Single-video mode needs no rewrite — paths already resolve correctly because the MD lives next to the `screenshots/` folder.
+
+4. **Write the MD file** with the Write tool:
+   - **1 video:** `<OUTPUT_FOLDER>/yt-extract_[DATE]_[slug].md` — derive the filename from the last path segment of OUTPUT_FOLDER.
+   - **2-3 videos:** `./yt-extract_[DATE]_[N]-videos/yt-extract_[DATE]_[N]-videos.md`.
+
+5. **Show confirmation in chat:**
+   - With screenshots: `📁 Saved: [folder]/[file].md ([N] screenshots)` — **take `[N]` from the `### Screenshot Status` line that the script already printed (format: "`N screenshots requested, M successfully extracted`" — use `M`, summed across all videos for multi-URL). Do NOT run a filesystem count to verify; the script is the source of truth.**
    - Without screenshots: `📁 Saved: [folder]/[file].md`
 
-10. **Follow-up invitation.** After the `📁 Saved:` line (or directly after the content when `--no-save` was used and the user declined saving), emit one blank line, then a **"What next?"** block that invites follow-up queries.
+6. **Follow-up invitation.** After the `📁 Saved:` line (or directly after the content when `--no-save` was used and the user declined saving), emit one blank line, then a **"What next?"** block that invites follow-up queries.
 
     Exact structure:
 
@@ -524,8 +565,6 @@ Once all subagents have finished, parse the markdown blocks from the results and
     **Do NOT emit the follow-up invitation in these cases:**
     - `--check` mode (Step 0.7 short-circuit — it has its own "Ready to extract." message).
     - Any error path where the subagent failed or aborted before content was assembled (e.g. yt-dlp install declined, Step 0.6.E stale-PATH abort). The block is contingent on a successful extraction with formatted content in the chat.
-
-> ⚠ **Shell-command hygiene in this step:** When moving files (step 4) and writing the MD (step 7), prefer plain `mv`/`Write` with no shell variables. Avoid PowerShell subexpressions (`$(...)`, `${...}`) and variable assignments (`$var = ...`) for post-move verification — they trigger security hooks on Windows and break the flow. The screenshot count comes from the script output, not from a `Measure-Object` pipeline.
 
 ### YAML frontmatter
 
@@ -574,3 +613,4 @@ videos:
 - **--screenshots without chapter markers and without timestamps:** `SCREENSHOTS_ASK_USER` marker → ask user for strategy (evenly distributed or manual input)
 - **Stream URL expired:** ffmpeg error during screenshot extraction → fetch a fresh URL once and retry
 - **Timestamp outside video duration:** skipped by the Python script with a WARNING, no interruption
+- **Target folder already exists:** script exits 2 with `FOLDER_EXISTS: <path>` on stderr → subagent prompts the user via AskUserQuestion and re-runs with `--force` on confirmation. Multi-URL parent-folder collisions are handled by the skill itself before dispatch (see Step 1).

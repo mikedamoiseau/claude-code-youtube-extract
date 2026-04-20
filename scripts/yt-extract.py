@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import argparse
 import shutil
+import datetime
 
 # Force UTF-8 on Windows
 if sys.platform == "win32":
@@ -47,6 +48,11 @@ def slugify(text: str, max_length: int = 50) -> str:
     text = re.sub(r"[\s_]+", "-", text).strip("-")
     text = re.sub(r"-+", "-", text)
     return text[:max_length].rstrip("-")
+
+
+def emit_stage(current: int, total: int, text: str) -> None:
+    """Emit a progress stage marker on stderr, flushed immediately."""
+    print(f"[{current}/{total}] {text}", file=sys.stderr, flush=True)
 
 
 def format_timestamp_display(seconds: float) -> str:
@@ -345,12 +351,14 @@ def get_stream_url(url: str) -> str | None:
 def extract_screenshots(
     url: str,
     timestamps: list[float],
-    slug: str,
+    out_dir: str,
     chapters: list[dict],
     warnings: list[str],
 ) -> list[tuple[float, str]]:
     """Extract PNG screenshots at given timestamps via ffmpeg.
-    Returns [(timestamp_seconds, filepath), ...].
+    Writes files directly into out_dir (caller owns that path).
+    Returns [(timestamp_seconds, filename), ...] — filename is the basename
+    only, so callers can build whatever relative path they need for markdown.
     Appends any issues to warnings list.
     """
     stream_url = get_stream_url(url)
@@ -360,7 +368,6 @@ def extract_screenshots(
         print(f"ERROR: {msg}", file=sys.stderr)
         return []
 
-    out_dir = os.path.join("yt-screenshots", slug)
     os.makedirs(out_dir, exist_ok=True)
 
     results = []
@@ -389,7 +396,7 @@ def extract_screenshots(
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if proc.returncode == 0 and os.path.exists(filepath):
-                results.append((ts, filepath))
+                results.append((ts, filename))
             else:
                 err = proc.stderr.strip() if proc.stderr else "unknown error"
                 msg = f"Frame at {format_timestamp_display(ts)} failed: {err}"
@@ -408,14 +415,17 @@ def embed_screenshots_in_transcript(
     screenshots: list[tuple[float, str]],
     chapters: list[dict],
 ) -> str:
-    """Insert screenshot references into transcript text at matching positions."""
+    """Insert screenshot references into transcript text at matching positions.
+    screenshots is [(ts, filename), ...] — filenames are resolved against the
+    sibling `screenshots/` folder where the markdown will live.
+    """
     if not segments:
         return ""
 
     # Map each screenshot to the last segment with start_time <= ts
     # (the segment that is "speaking" at the screenshot moment)
     screenshot_map: dict[int, list[str]] = {}
-    for ts, filepath in screenshots:
+    for ts, filename in screenshots:
         best_idx = 0
         for idx, (seg_ts, _) in enumerate(segments):
             if seg_ts <= ts:
@@ -423,7 +433,7 @@ def embed_screenshots_in_transcript(
             else:
                 break
 
-        rel_path = filepath.replace("\\", "/")
+        rel_path = f"screenshots/{filename}"
         chapter_title = get_chapter_for_timestamp(ts, chapters)
         ts_display = format_timestamp_display(ts)
 
@@ -458,34 +468,74 @@ def main():
         help="Extract screenshots. Without value: use chapter markers. "
              "With comma-separated timestamps: 0:30,2:15,5:00",
     )
+    parser.add_argument(
+        "--output-base", default=".",
+        help="Base directory for the output folder (default: current directory). "
+             "Script creates '<base>/yt-extract_<date>_<slug>/' inside it.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing target folder. Without this flag the script "
+             "exits with code 2 + 'FOLDER_EXISTS: <path>' on stderr when the "
+             "target already exists.",
+    )
     args = parser.parse_args()
 
     url = args.url
 
-    # Step 1: Metadata
+    # --- Stage count (adaptive to enabled features) ---
+    stages = ["metadata", "transcript"]
+    if args.comments:
+        stages.append("comments")
+    if args.screenshots is not None:
+        stages.append("screenshots")
+    stages.append("output")
+    total_stages = len(stages)
+    stage_idx = 0
+
+    # --- Step 1: Metadata ---
+    stage_idx += 1
+    emit_stage(stage_idx, total_stages, "Fetching metadata")
     meta = extract_metadata(url)
     if not meta:
         print(f"ERROR: Could not fetch metadata for {url}")
         sys.exit(1)
 
-    # Step 2: Transcript
+    # --- Compute target folder ---
+    date_str = datetime.date.today().isoformat()
+    slug = slugify(meta["title"])
+    target = os.path.join(args.output_base, f"yt-extract_{date_str}_{slug}")
+
+    # --- Collision guard ---
+    if os.path.isdir(target) and not args.force:
+        print(f"FOLDER_EXISTS: {target}", file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    os.makedirs(target, exist_ok=True)
+
+    # --- Step 2: Transcript ---
+    stage_idx += 1
+    emit_stage(stage_idx, total_stages, "Downloading transcript")
     transcript, sub_hint, segments = download_and_process_vtt(url, meta["id"])
 
-    # Step 3: Comments (optional)
+    # --- Step 3: Comments (optional) ---
     comments = []
     if args.comments:
+        stage_idx += 1
+        emit_stage(stage_idx, total_stages, "Fetching comments")
         comments = fetch_comments(url)
 
-    # Step 4: Screenshots (optional)
+    # --- Step 4: Screenshots (optional) ---
     screenshots = []
     screenshot_warnings: list[str] = []
     screenshot_requested = 0
-    screenshot_dir = ""
     screenshot_marker = ""  # "FFMPEG_MISSING" or "SCREENSHOTS_ASK_USER"
     if args.screenshots is not None:
+        stage_idx += 1
         if not check_ffmpeg():
             screenshot_marker = "FFMPEG_MISSING"
             screenshot_warnings.append("ffmpeg not found — no screenshots extracted.")
+            emit_stage(stage_idx, total_stages, "Screenshots skipped (ffmpeg missing)")
         else:
             timestamps = resolve_timestamps(
                 args.screenshots, meta["chapters"], meta["duration"],
@@ -493,14 +543,24 @@ def main():
             )
             if timestamps == "ASK_USER":
                 screenshot_marker = "SCREENSHOTS_ASK_USER"
+                emit_stage(stage_idx, total_stages, "Screenshots deferred (no chapters)")
             elif timestamps:
                 screenshot_requested = len(timestamps)
-                slug = slugify(meta["title"])
+                emit_stage(
+                    stage_idx, total_stages,
+                    f"Extracting {screenshot_requested} screenshots",
+                )
+                out_dir = os.path.join(target, "screenshots")
                 screenshots = extract_screenshots(
-                    url, timestamps, slug, meta["chapters"],
+                    url, timestamps, out_dir, meta["chapters"],
                     screenshot_warnings,
                 )
-                screenshot_dir = os.path.join("yt-screenshots", slug).replace("\\", "/")
+            else:
+                emit_stage(stage_idx, total_stages, "No valid screenshot timestamps")
+
+    # --- Step 5: Output ---
+    stage_idx += 1
+    emit_stage(stage_idx, total_stages, "Writing output")
 
     # --- Output structured markdown ---
 
@@ -554,12 +614,10 @@ def main():
             print("SCREENSHOTS_ASK_USER")
             print(f"video_duration: {meta['duration']}")
         else:
-            if screenshot_dir:
-                print(f"screenshot_dir: {screenshot_dir}")
-            for ts, filepath in screenshots:
+            for ts, filename in screenshots:
                 chapter_title = get_chapter_for_timestamp(ts, meta["chapters"])
                 ts_display = format_timestamp_display(ts)
-                rel_path = filepath.replace("\\", "/")
+                rel_path = f"screenshots/{filename}"
                 if chapter_title:
                     print(f"- ![{ts_display} — {chapter_title}]({rel_path}) {ts_display} — {chapter_title}")
                 else:
@@ -588,6 +646,12 @@ def main():
             print(f"{i}. **{c['author']}** (👍 {c['likes']}) — {c['text']}")
     else:
         print("Comments not available.")
+
+    # --- Trailer: tell the orchestrator where the output folder lives ---
+    # Forward slashes so the marker is stable across platforms — the skill
+    # parses this line verbatim to decide where to write the MD file.
+    print()
+    print(f"OUTPUT_FOLDER: {target.replace(os.sep, '/')}")
 
 
 if __name__ == "__main__":

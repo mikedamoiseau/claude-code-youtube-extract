@@ -4,6 +4,49 @@ All notable changes to `yt-extract` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-04-20
+
+Script-owned output folder layout and deterministic progress output. The intermediate `yt-screenshots/` staging folder is gone — the Python script now writes directly into the final `yt-extract_<DATE>_<slug>/` folder, with screenshots in a sibling `screenshots/` subfolder. The skill only orchestrates `--output-base` and saves the consolidated markdown.
+
+### yt-extract.py (backend)
+
+#### Added
+- `--output-base <dir>` CLI flag (default: current directory). The script creates `<base>/yt-extract_<DATE>_<slug>/` and writes screenshots into `<base>/yt-extract_<DATE>_<slug>/screenshots/` directly. No more staging, no moves, no rmdir cleanup.
+- `--force` CLI flag — overwrite an existing target folder. Without it, the script exits with code `2` and emits `FOLDER_EXISTS: <path>` on stderr so the caller can ask the user.
+- **Progress stage markers on stderr.** The script emits lines like `[1/5] Fetching metadata...`, `[2/5] Downloading transcript...`, `[3/5] Extracting 7 screenshots...`, flushed immediately. Stage count is adaptive — `[1/3]` for metadata + transcript + output, `[1/5]` when `--comments` and `--screenshots` are both set, etc. Visible in the Bash tool output during runs.
+- **`OUTPUT_FOLDER: <path>` trailer** as the final stdout line of every successful run. The skill parses it to decide where to write the consolidated markdown. Uses forward slashes so it is stable across platforms.
+
+#### Changed
+- `extract_screenshots()` signature: takes `out_dir` directly instead of constructing `yt-screenshots/<slug>` from `slug`. Returns `(timestamp, filename)` tuples instead of `(timestamp, full_path)` — callers build the markdown-relative path themselves.
+- The `### Screenshots` section no longer emits a `screenshot_dir:` line. Image paths in the markdown are now plain relative paths (`screenshots/NNN_HHmmss.png`) resolved against the folder where the MD lives.
+- The script now creates the target folder unconditionally after metadata fetch (before transcript/screenshot work). The collision guard runs before creation, so re-runs without `--force` fail cleanly.
+
+### yt-extract skill
+
+#### Added
+- `--output-base` and `--force` are passed by the skill automatically — users do not need to specify them. `--output-base .` for single-URL runs, `--output-base ./yt-extract_<DATE>_<N>-videos` for 2–3-URL runs (parent folder created before dispatch).
+- **Narration block before subagent dispatch.** For 1 URL: `Extracting from <url>. This typically takes 30–60 seconds...`. For 2–3 URLs: `Dispatching <N> parallel extractions...`. As each subagent returns, a one-line status is surfaced.
+- **Progress surfacing in subagent prompts.** Subagents are now instructed to forward the `[k/N]` stage markers they see on stderr as one-line updates, so the main chat keeps showing motion during long-running extractions.
+- **FOLDER_EXISTS handling.** If the script exits with code 2 and `FOLDER_EXISTS: <path>` is on stderr, the subagent asks the user via `AskUserQuestion` and re-runs with `--force`. For multi-URL runs, the skill also checks the parent folder upfront and asks before dispatching any subagents.
+- Parent folder for multi-URL runs is created explicitly by the skill before subagent dispatch (`mkdir -p ./yt-extract_<DATE>_<N>-videos`).
+
+#### Changed
+- **Auto-save flow radically simplified.** The old 8-step flow (mkdir → move screenshots → rewrite paths → rmdir staging) collapses to: read `OUTPUT_FOLDER:` from subagent output → prepend YAML frontmatter → write MD. For multi-video consolidation, the only path rewrite is prefixing each video's paths with its per-video folder name. No filesystem moves.
+- **`--no-save` semantics.** Script always creates the target folder (required for screenshots + `OUTPUT_FOLDER:` trailer). When the user declines saving at the end, the skill now removes the folder with `rm -rf` instead of leaving it orphaned.
+- **Multi-URL folder layout.** Each video lives in its own per-video folder inside the parent (`./yt-extract_DATE_N-videos/yt-extract_DATE_slug1/screenshots/`), instead of sharing a flat `./yt-extract_DATE_N-videos/screenshots/slug1/` layout. Each per-video folder is now a complete, standalone extraction unit.
+
+#### Removed
+- The intermediate `yt-screenshots/` top-level folder and all related staging / move / cleanup logic.
+- The `screenshot_dir:` line from the `### Screenshots` section — redundant with the new `OUTPUT_FOLDER:` trailer.
+- The "Shell-command hygiene" warning block in Step 3 that applied to the old `mv` + `Measure-Object` flow.
+
+#### Migration notes
+- Standalone script users (`python scripts/yt-extract.py <url>`) will see a new folder `./yt-extract_<DATE>_<slug>/` in their CWD where previously only `yt-screenshots/<slug>/` appeared. This is the intended new behavior.
+- Multi-URL consolidated markdown references screenshots via a deeper path (`yt-extract_DATE_slug1/screenshots/...` instead of `screenshots/slug1/...`). Old saved markdown files still render correctly because they use relative paths — only the relative structure inside new folders changes.
+- In the rare multi-URL + FOLDER_EXISTS race (two subagents hit a collision simultaneously), users may see more than one `AskUserQuestion` prompt in parallel. Known limitation; acceptable for now.
+
+- @mucky
+
 ## [1.1.0] — 2026-04-17
 
 Unified install-on-demand flow for both system dependencies (yt-dlp and ffmpeg),

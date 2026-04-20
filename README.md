@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.1.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.0-blue">
   <img alt="claude-code" src="https://img.shields.io/badge/Claude%20Code-plugin-purple">
   <img alt="license" src="https://img.shields.io/badge/license-Apache%202.0-green">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
@@ -27,7 +27,7 @@ Tutorial videos are trapped knowledge. The content is valuable, but it sits behi
 
 | Type  | Name         | Version | Description                                                                 |
 |-------|--------------|---------|-----------------------------------------------------------------------------|
-| Skill | `yt-extract` | 1.1.0   | Extract transcripts, metadata, screenshots, and comments from YouTube videos |
+| Skill | `yt-extract` | 1.2.0   | Extract transcripts, metadata, screenshots, and comments from YouTube videos |
 
 This plugin has no dependencies on other Claude Code plugins.
 
@@ -176,18 +176,23 @@ Screenshots land in two places: **embedded inside the transcript** at their matc
 ┌──────────────────────────────────────────────┐
 │  Subagent runs:                              │
 │  python yt-extract.py <url> --screenshots    │
+│    --output-base .                           │
 │                                              │
 │  Backend pipeline:                           │
 │  1. yt-dlp  → metadata + VTT transcript      │
 │  2. yt-dlp  → chapter markers (if present)   │
-│  3. ffmpeg  → capture frame at each marker   │
-│               → screenshots/001_00m30s.png   │
-│  4. VTT parser INTERLEAVES image refs        │
+│  3. Create yt-extract_DATE_slug/             │
+│     + screenshots/ subfolder                 │
+│  4. ffmpeg  → capture frame at each marker   │
+│               → <folder>/screenshots/*.png   │
+│  5. VTT parser INTERLEAVES image refs        │
 │     at matching transcript timestamps        │
+│                                              │
+│  stderr stream: [1/5] [2/5] … progress       │
 └────────────────────┬─────────────────────────┘
                      ▼
 ┌──────────────────────────────────────────────┐
-│  Markdown output                             │
+│  Markdown output (stdout)                    │
 │                                              │
 │  ### Transcript                              │
 │  [00:00] Welcome to the video...             │
@@ -195,28 +200,29 @@ Screenshots land in two places: **embedded inside the transcript** at their matc
 │          ![](screenshots/001_00m30s.png)     │
 │  [02:15] First step: install Docker...       │
 │          ![](screenshots/002_02m15s.png)     │
-│  [05:00] Configuration...                    │
-│          ![](screenshots/003_05m00s.png)     │
 │                                              │
 │  ### Screenshots                             │
 │  - [00:30] Intro — 001_00m30s.png            │
 │  - [02:15] Docker install — 002_02m15s.png   │
-│  - [05:00] Configuration — 003_05m00s.png    │
 │                                              │
 │  ### Screenshot Status                       │
-│  3 screenshots requested, 3 extracted        │
+│  2 screenshots requested, 2 extracted        │
+│                                              │
+│  OUTPUT_FOLDER: ./yt-extract_2026-04-20_slug │
 └────────────────────┬─────────────────────────┘
                      ▼
 ┌──────────────────────────────────────────────┐
-│  Auto-save relocates files into the folder   │
-│  yt-extract_2026-04-17_slug/                 │
-│    ├─ yt-extract_2026-04-17_*.md             │
+│  Skill reads OUTPUT_FOLDER, prepends         │
+│  YAML frontmatter, writes the .md file       │
+│  into the folder the script already created. │
+│  No moves, no rewrites for single-video.     │
+│                                              │
+│  yt-extract_2026-04-20_slug/                 │
+│    ├─ yt-extract_2026-04-20_*.md             │
 │    └─ screenshots/                           │
 │       ├─ 001_00m30s_intro.png                │
 │       ├─ 002_02m15s_docker.png               │
 │       └─ 003_05m00s_config.png               │
-│  Image refs in the saved MD are rewritten    │
-│  to point at screenshots/... (relative)      │
 └──────────────────────────────────────────────┘
 ```
 
@@ -317,14 +323,23 @@ yt-extract_2026-04-16_video-title-slug/
 **Multi-video (2-3 URLs):**
 
 ```
-yt-extract_2026-04-16_3-videos/
-├── yt-extract_2026-04-16_3-videos.md
-└── screenshots/
-    ├── video-one-slug/
-    │   └── 001_00m30s.png
-    └── video-two-slug/
-        └── 001_01m00s.png
+yt-extract_2026-04-20_3-videos/
+├── yt-extract_2026-04-20_3-videos.md            ← consolidated output
+├── yt-extract_2026-04-20_video-one-slug/        ← per-video folder (from subagent 1)
+│   └── screenshots/
+│       └── 001_00m30s.png
+├── yt-extract_2026-04-20_video-two-slug/        ← per-video folder (from subagent 2)
+│   └── screenshots/
+│       └── 001_01m00s.png
+└── yt-extract_2026-04-20_video-three-slug/
+    └── screenshots/
+        └── 001_02m45s.png
 ```
+
+Each per-video folder is a complete, standalone extraction unit — you can
+move or rename any one of them independently. The consolidated `.md` at the
+top references screenshots via the per-video folder path
+(`yt-extract_2026-04-20_video-one-slug/screenshots/001_00m30s.png`).
 
 ### Multi-video frontmatter
 
@@ -494,4 +509,4 @@ Good first issues: additional install methods (e.g. `choco` on Windows, `snap` o
 
 ---
 
-Version: 1.1.0 — [Changelog](CHANGELOG.md)
+Version: 1.2.0 — [Changelog](CHANGELOG.md)
