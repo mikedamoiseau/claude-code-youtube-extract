@@ -90,7 +90,7 @@ the exact `command` below.
 | OS       | Options (label → executed command)                                                                                                     |
 |----------|----------------------------------------------------------------------------------------------------------------------------------------|
 | Windows  | `pip` → `pip install yt-dlp` **or** `winget` → `winget install yt-dlp --accept-package-agreements --accept-source-agreements --silent --disable-interactivity` (**user picks**) |
-| macOS    | `brew` → `brew install yt-dlp`                                                                                                         |
+| macOS    | `brew` → `brew install yt-dlp` **or** `pip3` → `pip3 install --user yt-dlp` (**user picks**)                                           |
 | Linux    | `pip` → `pip install --user yt-dlp` **or** `pipx` → `pipx install yt-dlp` (**user picks**)                                             |
 
 Declining the yt-dlp install prompt aborts the skill with an error listing
@@ -104,7 +104,7 @@ both options. Doc URL: `https://github.com/yt-dlp/yt-dlp/wiki/Installation`.
 | macOS    | `brew` → `brew install ffmpeg`                                                                                                         |
 | Linux    | auto-detect pkg-mgr (see below)                                                                                                        |
 
-**Linux ffmpeg + sudo:** Step 0.6.A probes `sudo -n true 2>/dev/null` first. If
+**Linux ffmpeg + sudo:** The install helper (`skills/yt-extract/references/install-helper.md`, Step A0) probes `sudo -n true 2>/dev/null` first. If
 there is no active sudo session (or no `NOPASSWD` rule), the helper does NOT
 execute `sudo apt install -y ffmpeg` / `sudo dnf install -y ffmpeg` (it would
 block on the password prompt). Instead it shows the exact manual commands to
@@ -125,7 +125,7 @@ Declining the ffmpeg install prompt sets `skip_screenshots` and continues
    installs, winget `--accept-*-agreements` flags, and the `sudo -n` probe
    for any command requiring elevation.
 3. **winget exit code 43** ("no upgrade available") means the package is already
-   installed. SKILL.md Step 0.6.C treats this the same as exit 0 — proceed to
+   installed. The install helper's Step C treats this the same as exit 0 — proceed to
    Step D (verify). Do NOT treat it as a failed install (Step F). This matters
    because `yt-dlp.FFmpeg` (installed as a winget dependency of yt-dlp) and
    `Gyan.FFmpeg` can both exist, causing redundant installs with exit 43.

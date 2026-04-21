@@ -405,7 +405,7 @@ yt-extract requires [Claude Code](https://claude.com/claude-code) and two CLI de
 
 ## Prerequisites
 
-Cross-platform: macOS, Linux, and Windows are all supported. Python 3.8+ is required (use `python3` on macOS/Linux, `python` on Windows — the skill picks the right one automatically).
+Cross-platform: macOS, Linux, and Windows are all supported. Python 3.9+ is required (use `python3` on macOS/Linux, `python` on Windows — the skill picks the right one automatically).
 
 **Required — [yt-dlp](https://github.com/yt-dlp/yt-dlp)** — YouTube data extraction:
 

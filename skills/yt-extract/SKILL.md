@@ -15,7 +15,7 @@ Analyze the YouTube URL(s) from: <user_request>$ARGUMENTS</user_request>
 
 Determine the OS from the active environment / system prompt — you do not need to run a command. Store the value as `<OS>` and use it to resolve every OS-specific lookup below.
 
-**Python launcher** by OS (used when building subagent prompts — substitute `<PY>` before dispatch):
+**Python launcher** by OS (used anywhere the skill or a subagent invokes Python — substitute `<PY>` before execution):
 
 | OS       | `<PY>`    |
 |----------|-----------|
@@ -23,7 +23,7 @@ Determine the OS from the active environment / system prompt — you do not need
 | macOS    | `python3` |
 | Linux    | `python3` |
 
-If OS detection fails, default to `<PY> = python3` (POSIX fallback). Never dispatch a subagent prompt that still contains a literal `<PY>` token.
+If OS detection fails, default to `<PY> = python3` (POSIX fallback). Never execute a command or dispatch a subagent prompt that still contains a literal `<PY>` token.
 
 ### 0.2 Dependency install matrix
 
@@ -38,7 +38,7 @@ The skill offers install-on-demand for both dependencies. Each dependency has a 
 | OS       | Options (label → exact executed command)                                                                                               |
 |----------|----------------------------------------------------------------------------------------------------------------------------------------|
 | Windows  | `pip` → `pip install yt-dlp` **or** `winget` → `winget install yt-dlp --accept-package-agreements --accept-source-agreements --silent --disable-interactivity`  (→ **ask user**) |
-| macOS    | `brew` → `brew install yt-dlp`                                                                                                         |
+| macOS    | `brew` → `brew install yt-dlp` **or** `pip3` → `pip3 install --user yt-dlp`  (→ **ask user**)                                          |
 | Linux    | `pip` → `pip install --user yt-dlp` **or** `pipx` → `pipx install yt-dlp`  (→ **ask user**)                                            |
 
 **ffmpeg install options:**
@@ -54,16 +54,60 @@ The skill offers install-on-demand for both dependencies. Each dependency has a 
 **Why these exact flags:**
 - `--accept-package-agreements` / `--accept-source-agreements` (winget): auto-accept the third-party package and winget-source license terms. Without these flags, winget opens an interactive `y/n` prompt on first install of each source — which blocks the Bash tool indefinitely.
 - `--silent` / `--disable-interactivity` (winget): suppresses the installer UI and aborts if any remaining interactive prompt appears, so the skill fails fast instead of hanging.
-- `--user` (Linux `pip`): installs into the user-scope site-packages directory — avoids needing root and the resulting sudo-password prompt.
+- `--user` (Linux `pip`, macOS `pip3`): installs into the user-scope site-packages directory — avoids needing root on Linux and sidesteps the system-Python `externally-managed-environment` block on macOS (PEP 668).
 - `-y` (apt/dnf): auto-confirms the package install. Not sufficient by itself on Linux because `sudo` is still outside this scope — hence the `sudo -n` probe.
 
 **Official doc URLs (used in error messages):**
 - yt-dlp: `https://github.com/yt-dlp/yt-dlp/wiki/Installation`
 - ffmpeg: `https://ffmpeg.org/download.html`
 
-### 0.3 Check yt-dlp (always)
+### 0.3 Check Python runtime and yt-dlp (always)
 
-Run:
+**0.3.a — Python runtime.** The subagents invoke the Python script via `<PY>`. If Python is missing, the subagent's first command will fail — and on macOS without Xcode Command Line Tools, `/usr/bin/python3` is a GUI stub that triggers an installer dialog on first call, which blocks the Bash tool indefinitely (no stdin, no way to accept). Verify Python upfront (substitute `<PY>` from the Step 0.1 table before running):
+
+```bash
+<PY> --version 2>&1
+```
+
+**If Python is present** (stdout matches `Python 3.X.Y` with X >= 9): continue to 0.3.b.
+
+**If Python is missing or the command triggers an install-tool dialog** (macOS CLT prompt, `command not found`, or any non-zero exit): abort with the OS-specific message below. Do NOT retry and do NOT fall through to later steps — the subagent dispatch would fail.
+
+- **Windows:**
+  ```
+  Python 3 is not installed.
+
+  Install it from https://www.python.org/downloads/ (check "Add Python to PATH" in the installer), or run:
+    winget install Python.Python.3.12 --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+
+  Then restart your terminal and re-run /yt-extract.
+  ```
+- **macOS:**
+  ```
+  Python 3 is not installed (or Xcode Command Line Tools are missing).
+
+  Install the Command Line Tools by running in your own terminal:
+    xcode-select --install    (opens a GUI dialog — accept it)
+
+  Or install via Homebrew:
+    brew install python@3.12
+
+  Then re-run /yt-extract.
+  ```
+- **Linux:**
+  ```
+  Python 3 is not installed.
+
+  Install it via your package manager, e.g.:
+    sudo apt install -y python3    (Debian/Ubuntu)
+    sudo dnf install -y python3    (Fedora/RHEL)
+
+  Then re-run /yt-extract.
+  ```
+
+**Abort the skill** after emitting the message. There is no automatic install path for Python — the CLT GUI dialog on macOS cannot be accepted non-interactively, and Python itself is a prerequisite the user must install once.
+
+**0.3.b — yt-dlp.** Run:
 ```bash
 yt-dlp --version 2>&1
 ```
@@ -90,7 +134,7 @@ Split $ARGUMENTS on whitespace/newlines. Keep only strings starting with `https:
 - `--screenshots` → extract screenshots at chapter markers (requires ffmpeg)
 - `--screenshots 0:30,2:15,5:00` → extract screenshots at specific timestamps
 - `--no-save` → disable auto-save (default: analysis is auto-saved as an MD file)
-- `--check` → verify dependencies only, no extraction. Runs Step 0 (yt-dlp check, and ffmpeg check when combined with `--screenshots`), prints a readiness report, and stops. URLs are ignored in check mode.
+- `--check` → verify dependencies only, no extraction. Runs Step 0 (Python runtime check, yt-dlp check, and ffmpeg check when combined with `--screenshots`), prints a readiness report, and stops. URLs are ignored in check mode.
 
 ### 0.5 Check ffmpeg (only when `--screenshots` is set)
 
@@ -118,126 +162,25 @@ This Step-0 check replaces the per-subagent `FFMPEG_MISSING` handling. It also p
 
 ### 0.6 Install-dependency helper (shared flow)
 
-This is the common flow invoked by 0.3 and 0.5. Inputs:
+When Step 0.3.b or Step 0.5 needs to install a missing dependency, load and follow **`references/install-helper.md`** (inside this skill directory). That file documents the full flow as Steps A0 through F, including pre-flight checks (macOS brew availability, Linux sudo availability), the AskUserQuestion dialog, install execution, verification, and all error paths.
+
+Inputs passed to the helper (same shape as documented there):
 - `dep_name` — display name (e.g. `"yt-dlp"` or `"ffmpeg"`)
-- `options` — ordered list of `{label, command}` pairs from the 0.2 matrix for the detected OS. `label` is the short user-facing string (e.g. `"winget"`). `command` is the full non-interactive Bash line to execute.
+- `options` — ordered list of `{label, command}` pairs from the 0.2 matrix for the detected OS
 - `doc_url` — official-docs link for manual install instructions
 - `on_decline` — `"abort"` (yt-dlp) or `"skip_screenshots"` (ffmpeg)
 - `verify_cmd` — command that must exit 0 after a successful install
 
-**Step A — Pre-flight check (Linux ffmpeg only).**
-
-When running on Linux AND the dep is ffmpeg AND the detected command uses `sudo`: probe `sudo -n true 2>/dev/null`. If that fails (no active sudo session, no `NOPASSWD`), skip Step A's AskUserQuestion entirely and go straight to Step B's abort path with this message:
-
-```
-ffmpeg is not installed, and installing it on Linux requires sudo.
-
-I cannot run `sudo` from here without blocking on the password prompt. Please install ffmpeg manually in your own terminal:
-
-  - sudo apt install -y ffmpeg    (Debian/Ubuntu)
-  - sudo dnf install -y ffmpeg    (Fedora/RHEL)
-
-Then re-run /yt-extract.
-
-Docs: https://ffmpeg.org/download.html
-```
-
-Set `skip_screenshots = true` (because `on_decline == "skip_screenshots"` for ffmpeg) and return to the caller. The user is already informed; no second prompt needed.
-
-For all other cases, continue to Step A's regular flow below.
-
-**Step A — Ask the user.**
-
-If `options.length == 1`:
-```
-AskUserQuestion
-  question: "[dep_name] is not installed. Install with `[options[0].label]` (`[options[0].command]`)?"
-  options:
-    - "Yes, install it"
-    - "No"
-```
-
-If `options.length > 1`:
-```
-AskUserQuestion
-  question: "[dep_name] is not installed. Which install method should I use?"
-  options:
-    - one option per entry in `options` — label = `options[i].label`; description = `"Runs: [options[i].command]"`
-    - "No, do not install"
-```
-
-**Step B — On decline.**
-
-- If `on_decline == "abort"`:
-  ```
-  [dep_name] is required but was not installed.
-
-  Install it manually with one of:
-    - [options[0].command]
-    - [options[1].command]   (if present)
-
-  Then re-run /yt-extract.
-
-  Docs: [doc_url]
-  ```
-  **Abort the skill.**
-
-- If `on_decline == "skip_screenshots"`: set `skip_screenshots = true` and return to the caller (no abort).
-
-**Step C — On accept: run the chosen install command.**
-
-Execute `options[chosen_index].command` via Bash exactly as written (the command already contains all non-interactive flags). Capture exit code and stderr.
-
-**Winget "already installed" special case:** If the command is a `winget` command and the exit code is `43` (package already installed, no upgrade available), treat this as exit code `0` — the package is present on the system. Proceed to Step D to verify PATH availability.
-
-**Step D — Verify.**
-
-Run `verify_cmd`. If it succeeds (exit 0), the install worked — return success to the caller.
-
-**Step E — On verification failure (install command returned exit 0, or winget exit 43, but binary still not on PATH).**
-
-```
-Installation completed but [dep_name] is still not on PATH.
-
-This usually means the shell hasn't picked up the new PATH entry yet.
-Please restart your terminal and re-run /yt-extract.
-
-If the problem persists, install [dep_name] manually:
-  - [options[0].command]
-  - [options[1].command]   (if present)
-
-Docs: [doc_url]
-```
-
-**Abort the skill** regardless of `on_decline` — a half-installed dep is not a "skip screenshots" situation, it's broken.
-
-**Note:** Step E is the expected behavior on Windows+winget after a first-time install — winget updates the user PATH but the current shell's PATH is stale. The message is designed to guide the user through the one-time restart, not to signal a broken install.
-
-**Step F — On install command itself failing (non-zero exit).**
-
-```
-Failed to install [dep_name].
-
-Command: [chosen command]
-Exit code: [N]
-Error: [first line of stderr]
-
-Please install [dep_name] manually:
-  - [options[0].command]
-  - [options[1].command]   (if present)
-
-Docs: [doc_url]
-```
-
-**Abort the skill.**
+The helper returns control after a successful install, or aborts the skill on a hard failure. Per-dep return semantics are documented in the reference file.
 
 ### 0.7 Short-circuit when `--check` is set
 
 If the `--check` flag was parsed, print a readiness report and **stop**. Do NOT proceed to Step 1 or dispatch any subagents. Ignore any URLs the user passed.
 
-Capture the current tool versions:
+Capture the current tool versions (substitute `<PY>` from Step 0.1 before running):
 
 ```bash
+<PY> --version
 yt-dlp --version
 ```
 
@@ -251,6 +194,7 @@ Then output:
 
 ```
 Dependencies ready:
+  - Python: [python version string]
   - yt-dlp: [yt-dlp version string]
   - ffmpeg: [ffmpeg first line — only if --screenshots was set; omit otherwise]
 
@@ -306,7 +250,7 @@ Extract all data for this YouTube video and summarize the transcript.
 
 2. **Check the `### Screenshots` section for `SCREENSHOTS_ASK_USER`:**
    - If `SCREENSHOTS_ASK_USER` appears in the `### Screenshots` section: The video has no chapter markers. Ask the user via AskUserQuestion: "This video has no chapter markers. How should screenshots be taken?" with options: A) "Evenly distributed (1 per 2 min, max 10)" B) "Enter manual timestamps". On A: compute timestamps based on `video_duration` from the `### Screenshots` section, build a comma-separated list, re-run the script with `--screenshots T1,T2,T3,...` **and `--force`** (the first run already created the target folder). On B: wait for user input, re-run with the entered timestamps and `--force`. IMPORTANT: When re-running, DISCARD the first run's output entirely and replace it with the new one.
-   - `FFMPEG_MISSING` should not appear at this stage — Step 0.5 already verified ffmpeg presence before dispatch. If it does appear (defense-in-depth), treat it as a hard error and surface the message from Step 0.6.E to the user.
+   - `FFMPEG_MISSING` should not appear at this stage — Step 0.5 already verified ffmpeg presence before dispatch. If it does appear (defense-in-depth), treat it as a hard error and surface the Step E stale-PATH message from `references/install-helper.md` to the user.
 
 3. Return the **Metadata**, **Description**, **Chapters** (if present), and **Comments** sections UNCHANGED.
 
@@ -567,7 +511,7 @@ The Python script creates the per-video folder and any screenshots inside it dir
 
     **Do NOT emit the follow-up invitation in these cases:**
     - `--check` mode (Step 0.7 short-circuit — it has its own "Ready to extract." message).
-    - Any error path where the subagent failed or aborted before content was assembled (e.g. yt-dlp install declined, Step 0.6.E stale-PATH abort). The block is contingent on a successful extraction with formatted content in the chat.
+    - Any error path where the subagent failed or aborted before content was assembled (e.g. yt-dlp install declined, install-helper Step E stale-PATH abort). The block is contingent on a successful extraction with formatted content in the chat.
 
 ### YAML frontmatter
 
@@ -614,7 +558,6 @@ videos:
 - **Manual subtitles only:** use them (no "auto-generated" hint)
 - **ffmpeg not installed:** handled in Step 0.5 before subagent dispatch (install-on-demand with per-OS command). `FFMPEG_MISSING` marker in the script output is defensive-only — normally unreachable.
 - **--screenshots without chapter markers and without timestamps:** `SCREENSHOTS_ASK_USER` marker → ask user for strategy (evenly distributed or manual input)
-- **Stream URL expired:** ffmpeg error during screenshot extraction → fetch a fresh URL once and retry
 - **Timestamp outside video duration:** skipped by the Python script with a WARNING, no interruption
 - **Target folder already exists:** script exits 2 with `FOLDER_EXISTS: <path>` on stderr → subagent prompts the user via AskUserQuestion and re-runs with `--force` on confirmation. Multi-URL parent-folder collisions are handled by the skill itself before dispatch (see Step 1).
 
@@ -629,4 +572,4 @@ Contributor reference. End-users never read this section.
 - **Adding a new install target:** update the Step 0.2 matrix AND the matching matrix in `CLAUDE.md`. Every new command must be non-interactive (no license prompts, no sudo password prompts, no stdin reads) — the Bash tool has no stdin channel.
 - **Adding a sentinel or orchestration trailer:** the current registry is `FFMPEG_MISSING`, `SCREENSHOTS_ASK_USER`, `FOLDER_EXISTS:` (stderr, exit 2), and `OUTPUT_FOLDER:` (trailing stdout). Adding a new one requires coordinated changes in the script, both subagent prompts (Step 1), the skill's post-processing (Step 2/3), and the `CLAUDE.md` registry.
 - **Adding a Markdown section:** the script emits a fixed set of `###` headers parsed verbatim by the subagent prompts. Renaming or adding one requires changes on both sides — see the "Section headers" note in `CLAUDE.md`.
-- **Line-count budget:** this skill declares `disable-model-invocation: true`, which relaxes the usual 500-line ceiling. Still, prefer extracting long sub-workflows (e.g. the install helper) into `skills/yt-extract/references/` rather than growing this file further.
+- **Line-count budget:** this skill declares `disable-model-invocation: true`, which relaxes the usual 500-line ceiling. The install-dependency helper already lives in `references/install-helper.md` — prefer extracting other long sub-workflows to `references/` rather than growing this file further.
