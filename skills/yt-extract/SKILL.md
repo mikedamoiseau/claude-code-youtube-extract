@@ -250,7 +250,7 @@ ffmpeg -version 2>&1 | head -1
 Then output:
 
 ```
-✅ Dependencies ready:
+Dependencies ready:
   - yt-dlp: [yt-dlp version string]
   - ffmpeg: [ffmpeg first line — only if --screenshots was set; omit otherwise]
 
@@ -404,13 +404,13 @@ Once all subagents have finished, parse the markdown blocks from the results and
 ---
 
 ## Transcript Summary
-[If auto-generated: > ℹ️ Auto-generated subtitles ([language])]
-[If livestream: > ℹ️ Livestream recording]
-[If no transcript: > ❌ No transcript available.]
+[If auto-generated: > Note: Auto-generated subtitles ([language])]
+[If livestream: > Note: Livestream recording]
+[If no transcript: > No transcript available.]
 
 [Structured summary: Core Thesis, Main Points, Tools & Resources, Quotes & Numbers]
 
-> 💡 Full transcript available — re-run with `--full-transcript` if needed.
+> Tip: Full transcript available — re-run with `--full-transcript` if needed.
 
 ---
 
@@ -420,7 +420,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 [• In `--full-transcript` mode with custom-timestamp screenshots: OMIT — already embedded with h3 headings inside `## Transcript`.]
 [• In summary mode with chapter-aligned screenshots: OMIT — already embedded under `## Chapters` above.]
 [• In summary mode with NON-chapter-aligned screenshots (custom timestamps, or no chapters, or count mismatch): render the standalone list with image references and timestamps — from the subagent's `### Screenshots` section UNCHANGED.]
-[• If `--screenshots` was requested but produced nothing: > ℹ️ No screenshots extracted.]
+[• If `--screenshots` was requested but produced nothing: > No screenshots extracted.]
 [• If `--screenshots` was not requested: omit the section.]
 
 ## Screenshot Status
@@ -431,8 +431,8 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 ## Top Comments
 [If present: numbered list]
-[If skipped: > ℹ️ Comments not requested. Enable with `--comments`.]
-[If error: > ℹ️ Comments could not be loaded.]
+[If skipped: > Comments not requested. Enable with `--comments`.]
+[If error: > Comments could not be loaded.]
 ```
 
 **With --full-transcript:** the section is called `## Transcript`. When `--screenshots` is also set, the Python script pre-structures the transcript with `### [HH:MM] Chapter Title` h3 sub-headings (for chapter-aligned runs) or `### [HH:MM]` h3 sub-headings (for custom timestamps) — each heading is immediately followed by the matching screenshot and then the transcript text for that interval. Use the subagent's output verbatim; no further reformatting needed. No hint about --full-transcript needed.
@@ -491,7 +491,7 @@ Once all subagents have finished, parse the markdown blocks from the results and
 
 **Default behavior (auto-save):** The analysis is automatically saved as a Markdown file in its own folder. The output still appears in full in the chat.
 
-**With `--no-save`:** The Python script still runs normally and creates the target folder (it has to — screenshots and the OUTPUT_FOLDER trailer depend on it). After the chat output, ask: "📁 Should I save the analysis as a Markdown file?" On "yes" → same flow as auto-save (including the follow-up invitation at the end). On "no" → **remove the folder(s) the script created** with `rm -rf <OUTPUT_FOLDER>` (for 1 video) or `rm -rf ./yt-extract_[DATE]_[N]-videos/` (for multi-video), then emit the follow-up invitation at the very end (with phrasing "The analysis is in context — you can ask me to:" since no file was saved).
+**With `--no-save`:** The Python script still runs normally and creates the target folder (it has to — screenshots and the OUTPUT_FOLDER trailer depend on it). **Even in `--no-save` mode, parse the `OUTPUT_FOLDER:` trailer from each subagent's output** — it is required to locate the folder for cleanup on decline. After the chat output, ask: "Should I save the analysis as a Markdown file?" On "yes" → same flow as auto-save (including the follow-up invitation at the end). On "no" → **remove the folder(s) the script created** with `rm -rf <OUTPUT_FOLDER>` (for 1 video) or `rm -rf ./yt-extract_[DATE]_[N]-videos/` (for multi-video), then emit the follow-up invitation at the very end (with phrasing "The analysis is in context — you can ask me to:" since no file was saved).
 
 ### Folder structure
 
@@ -536,15 +536,15 @@ The Python script creates the per-video folder and any screenshots inside it dir
    - **2-3 videos:** `./yt-extract_[DATE]_[N]-videos/yt-extract_[DATE]_[N]-videos.md`.
 
 5. **Show confirmation in chat:**
-   - With screenshots: `📁 Saved: [folder]/[file].md ([N] screenshots)` — **take `[N]` from the `### Screenshot Status` line that the script already printed (format: "`N screenshots requested, M successfully extracted`" — use `M`, summed across all videos for multi-URL). Do NOT run a filesystem count to verify; the script is the source of truth.**
-   - Without screenshots: `📁 Saved: [folder]/[file].md`
+   - With screenshots: `Saved: [folder]/[file].md ([N] screenshots)` — **take `[N]` from the `### Screenshot Status` line that the script already printed (format: "`N screenshots requested, M successfully extracted`" — use `M`, summed across all videos for multi-URL). Do NOT run a filesystem count to verify; the script is the source of truth.**
+   - Without screenshots: `Saved: [folder]/[file].md`
 
-6. **Follow-up invitation.** After the `📁 Saved:` line (or directly after the content when `--no-save` was used and the user declined saving), emit one blank line, then a **"What next?"** block that invites follow-up queries.
+6. **Follow-up invitation.** After the `Saved:` line (or directly after the content when `--no-save` was used and the user declined saving), emit one blank line, then a **"What next?"** block that invites follow-up queries.
 
     Exact structure:
 
     ```
-    💬 **What next?** The full analysis is in context — you can ask me to:
+    **What next?** The full analysis is in context — you can ask me to:
     - Extract all tools & resources as a bulleted checklist
     - Write a LinkedIn post / blog draft from the summary
     - [conditional 4th leverage bullet, see below]
@@ -608,7 +608,7 @@ videos:
 ## Edge cases
 
 - **Video unavailable/private:** the section shows an error message; synthesis is based on available videos
-- **No transcript:** ❌ hint in the section, summary is omitted for that video, synthesis uses available transcripts
+- **No transcript:** "No transcript available" hint in the section, summary is omitted for that video, synthesis uses available transcripts
 - **Live livestream:** "Ongoing livestream — transcript available only after it ends"; metadata is still shown
 - **YouTube Short (< 3 min):** process normally, no length hint
 - **Manual subtitles only:** use them (no "auto-generated" hint)
@@ -617,3 +617,16 @@ videos:
 - **Stream URL expired:** ffmpeg error during screenshot extraction → fetch a fresh URL once and retry
 - **Timestamp outside video duration:** skipped by the Python script with a WARNING, no interruption
 - **Target folder already exists:** script exits 2 with `FOLDER_EXISTS: <path>` on stderr → subagent prompts the user via AskUserQuestion and re-runs with `--force` on confirmation. Multi-URL parent-folder collisions are handled by the skill itself before dispatch (see Step 1).
+
+---
+
+## Extending this skill
+
+Contributor reference. End-users never read this section.
+
+- **Full conventions:** see `CLAUDE.md` at the repo root — it is the source of truth for the orchestration contract between this skill and `scripts/yt-extract.py`.
+- **Adding a user-facing flag:** extend the parser in Step 0.4, wire its translation into the `--output-base`/script-flag block in Step 1 (both the summary-mode and `--full-transcript` subagent prompts), and document it in `README.md` and `argument-hint`.
+- **Adding a new install target:** update the Step 0.2 matrix AND the matching matrix in `CLAUDE.md`. Every new command must be non-interactive (no license prompts, no sudo password prompts, no stdin reads) — the Bash tool has no stdin channel.
+- **Adding a sentinel or orchestration trailer:** the current registry is `FFMPEG_MISSING`, `SCREENSHOTS_ASK_USER`, `FOLDER_EXISTS:` (stderr, exit 2), and `OUTPUT_FOLDER:` (trailing stdout). Adding a new one requires coordinated changes in the script, both subagent prompts (Step 1), the skill's post-processing (Step 2/3), and the `CLAUDE.md` registry.
+- **Adding a Markdown section:** the script emits a fixed set of `###` headers parsed verbatim by the subagent prompts. Renaming or adding one requires changes on both sides — see the "Section headers" note in `CLAUDE.md`.
+- **Line-count budget:** this skill declares `disable-model-invocation: true`, which relaxes the usual 500-line ceiling. Still, prefer extracting long sub-workflows (e.g. the install helper) into `skills/yt-extract/references/` rather than growing this file further.
