@@ -50,7 +50,14 @@ User-facing flags (`--comments`, `--screenshots [timestamps]`, `--full-transcrip
 
 ## Testing
 
-No automated tests yet. Verification is manual: install the plugin locally and
+A small automated test layer covers deterministic helper functions. Run:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Manual verification still matters for the full integration path: install the plugin locally and
 run `/yt-extract <real-youtube-url>` with and without `--screenshots`,
 `--comments`, `--full-transcript`. Confirm the auto-save folder layout and
 Markdown headers match the documented output structure.
