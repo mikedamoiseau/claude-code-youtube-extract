@@ -8,6 +8,8 @@ Usage:
     python yt-extract.py <URL> [--comments] [--screenshots [TIMESTAMPS]]
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import re
