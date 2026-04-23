@@ -66,11 +66,12 @@ pytest
 
 Expected output: all tests pass in well under a second.
 
-**Out of scope** of the automated suite (intentional, not a gap to backfill
-without discussion): subprocess invocations (`yt-dlp`, `ffmpeg`), file I/O,
-network calls, VTT parsing, and the full `main()` assembly with the
-trailing `OUTPUT_FOLDER:` marker. Those paths still rely on manual
-verification.
+**Not covered by this unit suite:** subprocess invocations (`yt-dlp`,
+`ffmpeg`), file I/O, network calls, VTT parsing, and the full `main()`
+assembly with the trailing `OUTPUT_FOLDER:` marker. Those paths rely on
+manual verification today — broadening the automated surface (subprocess
+fakes, a VTT fixture, golden-file tests for `main()`) is a reasonable
+follow-up.
 
 Manual verification still matters for the full integration path: install
 the plugin locally and run `/yt-extract <real-youtube-url>` with and

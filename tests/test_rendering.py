@@ -26,8 +26,10 @@ def test_slugify_basic_behavior():
 
 
 def test_slugify_strips_symbols_keeps_unicode_letters():
-    # Emoji and other non-word symbols are stripped; Unicode letters
-    # (Python's \w matches them by default) survive lower-casing.
+    # Python's \w matches Unicode letters by default, so accented characters
+    # survive — slugify deliberately does NOT ASCII-fold ("Café" → "café",
+    # not "cafe"). Symbols/emoji are stripped. Callers that need ASCII
+    # output should compose an extra fold step.
     assert yt_extract.slugify("Café ☕") == "café"
 
 
@@ -42,12 +44,13 @@ def test_slugify_collapses_dashes_and_replaces_underscores():
 
 
 def test_slugify_strips_trailing_dash_after_truncation():
-    # "a-" * 30 is 60 chars. After the strip("-") pass it becomes 59 chars,
-    # truncation at max_length=50 lands on a dash, and the final rstrip
-    # removes it — so the result has no trailing dash.
+    # "a-" * 30 is 60 chars — forces truncation to land on a dash.
+    # Contract, not implementation shape: result respects max_length, has no
+    # trailing dash, and preserves the leading slug content.
     result = yt_extract.slugify("a-" * 30)
-    assert len(result) == 49
+    assert len(result) <= 50
     assert not result.endswith("-")
+    assert result.startswith("a-a-")
 
 
 # --- timestamp formatters ---
